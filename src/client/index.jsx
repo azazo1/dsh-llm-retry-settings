@@ -131,7 +131,11 @@ const L = {
   codesCount: (n) => `将补充 ${n} 个错误码`,
   codesClear: '清空',
   codesCustom: '自定义',
-  codesCustomHint: '不在已知清单内（provider 配置手工加的）',
+  codesCustomHint: '不在已知清单内（provider 配置手工加的，或在此输入后保存）',
+  codesAddPlaceholder: '输入自定义错误码，如 MY_PROVIDER_BUSY',
+  codesAddBtn: '添加',
+    codesAddDup: (c) => `已勾选或已存在：${c}`,
+    codesAddBad: (c) => `${c} 含空白或非法字符（仅限 A-Z 0-9 _ - .）`,
   groupContinue: '输出截断自动续写',
   switchOn: '开启',
   switchOff: '关闭',
@@ -193,6 +197,12 @@ const CSS = [
 
   '.dlr-chipsWrap{display:flex;flex-direction:column;gap:10px;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px}',
   '.dlr-chipOuter{display:flex;flex-direction:column;gap:6px}',
+  '.dlr-addRow{display:flex;gap:6px;align-items:center;max-width:420px}',
+  '.dlr-addRow .dlr-input{flex:1;min-width:0}',
+  '.dlr-addBtn{flex:none;height:32px;padding:0 14px;border:none;border-radius:6px;cursor:pointer;background:var(--dsw-alias-state-business-primary);color:#fff;font-size:13px}',
+  '.dlr-addBtn:disabled{opacity:.5;cursor:default}',
+  '.dlr-addWarn{color:var(--dsw-alias-label-critical, #d05a5a)}',
+  '.dlr-addBtn:not(:disabled):hover{filter:brightness(1.08)}',
   '.dlr-chipHint{color:var(--dsw-alias-label-caption);font-size:12px;line-height:17px}',
   '.dlr-chips{display:flex;flex-wrap:wrap;gap:6px}',
   '.dlr-chipGroup{display:flex;flex-direction:column;gap:6px}',
@@ -303,7 +313,8 @@ function Chip({ code, title, warn, unknown, on, disabled, onClick }) {
   )
 }
 
-function CodeChips({ selected, disabled, onToggle, onClear }) {
+function CodeChips({ selected, disabled, onToggle, onClear, onAdd }) {
+  const [input, setInput] = useState('')
   const selSet = new Set(selected)
   const custom = selected.filter((c) => !KNOWN_CODE_SET.has(c))
   const chip = ({ code, desc, warn }) => (
@@ -312,7 +323,7 @@ function CodeChips({ selected, disabled, onToggle, onClear }) {
   )
   return (
     <div className="dlr-chipsWrap">
-      {custom.length > 0 && (
+      {(custom.length > 0 || input.trim() !== '') && (
         <div className="dlr-chipGroup">
           <span className="dlr-chipGroupLabel">
             {L.codesCustom}
@@ -320,10 +331,40 @@ function CodeChips({ selected, disabled, onToggle, onClear }) {
           </span>
           <div className="dlr-chips">
             {custom.map((code) => (
-              <Chip key={code} code={code} title="自定义错误码（provider 配置里手工加入的），点击取消勾选"
+              <Chip key={code} code={code} title="自定义错误码，点击取消勾选"
                 unknown on disabled={disabled} onClick={() => onToggle(code)} />
             ))}
           </div>
+          {onAdd && (
+            <div className="dlr-addRow">
+              <input
+                className="dlr-input"
+                value={input}
+                placeholder={L.codesAddPlaceholder}
+                spellCheck={false}
+                disabled={disabled}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    onAdd(input)
+                    setInput('')
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="dlr-addBtn"
+                disabled={disabled || input.trim() === ''}
+                onClick={() => {
+                  onAdd(input)
+                  setInput('')
+                }}
+              >
+                {L.codesAddBtn}
+              </button>
+            </div>
+          )}
         </div>
       )}
       {CODE_CATEGORIES.map((cat) => {
@@ -386,6 +427,7 @@ function RetrySettingsRow({ useScope, scope }) {
 
   const [draft, setDraft] = useState(current)
   const [saveState, setSaveState] = useState(null) // null | 'saving' | 'ok' | 'fail'
+  const [addMsg, setAddMsg] = useState(null) // 自定义码输入反馈 null | {kind:'dup'|'bad', code}
 
   // 外部变更跟随（渲染期调整，无 effect 竞态）：快照变化时，草稿若仍是旧快照的
   // 原样（用户没改过）就跟随更新；用户改过则保留草稿（dirty）
@@ -404,6 +446,20 @@ function RetrySettingsRow({ useScope, scope }) {
       if (cur.includes(code)) return { ...d, retryableCodes: cur.filter((c) => c !== code) }
       return { ...d, retryableCodes: [...cur, code] }
     })
+  // 自定义错误码：归一化为宿主风格（大写），只放行合理的标识符字符。
+  // KNOWN 码也允许手输（等于勾选）；已存在时给一次性反馈，不重复追加。
+  const CODE_RE = /^[A-Z0-9_][A-Z0-9_.-]*$/
+  const addCode = (raw) => {
+    const code = String(raw ?? '').trim().toUpperCase()
+    if (code === '') return
+    if (!CODE_RE.test(code)) { setAddMsg({ kind: 'bad', code }); return }
+    setDraft((d) => {
+      const cur = Array.isArray(d.retryableCodes) ? d.retryableCodes : []
+      if (cur.includes(code)) { setAddMsg({ kind: 'dup', code }); return d }
+      setAddMsg(null)
+      return { ...d, retryableCodes: [...cur, code] }
+    })
+  }
 
   const save = useCallback(async () => {
     setSaveState('saving')
@@ -483,7 +539,13 @@ function RetrySettingsRow({ useScope, scope }) {
               disabled={!writable}
               onToggle={toggleCode}
               onClear={() => update('retryableCodes', [])}
+              onAdd={addCode}
             />
+            {addMsg && (
+              <span className={'dlr-chipHint' + (addMsg.kind === 'bad' ? ' dlr-addWarn' : '')}>
+                {addMsg.kind === 'dup' ? L.codesAddDup(addMsg.code) : L.codesAddBad(addMsg.code)}
+              </span>
+            )}
             <span className="dlr-chipHint">{L.fieldCodesHint}</span>
           </div>
         </div>
