@@ -323,7 +323,7 @@ function CodeChips({ selected, disabled, onToggle, onClear, onAdd }) {
   )
   return (
     <div className="dlr-chipsWrap">
-      {(custom.length > 0 || input.trim() !== '') && (
+      {(onAdd || custom.length > 0) && (
         <div className="dlr-chipGroup">
           <span className="dlr-chipGroupLabel">
             {L.codesCustom}
