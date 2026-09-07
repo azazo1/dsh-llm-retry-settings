@@ -106,6 +106,8 @@ const KNOWN_CODES = [
 ]
 
 const KNOWN_CODE_SET = new Set(KNOWN_CODES.map((k) => k.code))
+// 自定义码白名单：宿主错误码是全大写标识符；输入侧同样放行 . 与 -（provider 侧可能带点）。
+const CODE_RE = /^[A-Z0-9_][A-Z0-9_.-]*$/
 
 const L = {
   title: 'LLM 自动重试',
@@ -132,6 +134,7 @@ const L = {
   codesClear: '清空',
   codesCustom: '自定义',
   codesCustomHint: '不在已知清单内（provider 配置手工加的，或在此输入后保存）',
+  codesCustomChip: '自定义错误码，点击取消勾选',
   codesAddPlaceholder: '输入自定义错误码，如 MY_PROVIDER_BUSY',
   codesAddBtn: '添加',
     codesAddDup: (c) => `已勾选或已存在：${c}`,
@@ -315,6 +318,11 @@ function Chip({ code, title, warn, unknown, on, disabled, onClick }) {
 
 function CodeChips({ selected, disabled, onToggle, onClear, onAdd }) {
   const [input, setInput] = useState('')
+  const commit = () => {
+    if (input.trim() === '') return
+    onAdd(input)
+    setInput('')
+  }
   const selSet = new Set(selected)
   const custom = selected.filter((c) => !KNOWN_CODE_SET.has(c))
   const chip = ({ code, desc, warn }) => (
@@ -331,7 +339,7 @@ function CodeChips({ selected, disabled, onToggle, onClear, onAdd }) {
           </span>
           <div className="dlr-chips">
             {custom.map((code) => (
-              <Chip key={code} code={code} title="自定义错误码，点击取消勾选"
+              <Chip key={code} code={code} title={L.codesCustomChip}
                 unknown on disabled={disabled} onClick={() => onToggle(code)} />
             ))}
           </div>
@@ -347,8 +355,7 @@ function CodeChips({ selected, disabled, onToggle, onClear, onAdd }) {
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     e.preventDefault()
-                    onAdd(input)
-                    setInput('')
+                    commit()
                   }
                 }}
               />
@@ -356,10 +363,7 @@ function CodeChips({ selected, disabled, onToggle, onClear, onAdd }) {
                 type="button"
                 className="dlr-addBtn"
                 disabled={disabled || input.trim() === ''}
-                onClick={() => {
-                  onAdd(input)
-                  setInput('')
-                }}
+                onClick={commit}
               >
                 {L.codesAddBtn}
               </button>
@@ -440,25 +444,22 @@ function RetrySettingsRow({ useScope, scope }) {
 
   const dirty = !sameJson(draft, current)
   const update = (field, v) => setDraft((d) => ({ ...d, [field]: v }))
-  const toggleCode = (code) =>
-    setDraft((d) => {
-      const cur = Array.isArray(d.retryableCodes) ? d.retryableCodes : []
-      if (cur.includes(code)) return { ...d, retryableCodes: cur.filter((c) => c !== code) }
-      return { ...d, retryableCodes: [...cur, code] }
-    })
+  const codesOf = (d) => (Array.isArray(d.retryableCodes) ? d.retryableCodes : [])
+  const toggleCode = (code) => {
+    const cur = codesOf(draft)
+    update('retryableCodes', cur.includes(code) ? cur.filter((c) => c !== code) : [...cur, code])
+  }
   // 自定义错误码：归一化为宿主风格（大写），只放行合理的标识符字符。
   // KNOWN 码也允许手输（等于勾选）；已存在时给一次性反馈，不重复追加。
-  const CODE_RE = /^[A-Z0-9_][A-Z0-9_.-]*$/
+  // 反馈写在 updater 外：updater 在并发渲染下可能被跑多次，不适合带副作用。
   const addCode = (raw) => {
     const code = String(raw ?? '').trim().toUpperCase()
     if (code === '') return
     if (!CODE_RE.test(code)) { setAddMsg({ kind: 'bad', code }); return }
-    setDraft((d) => {
-      const cur = Array.isArray(d.retryableCodes) ? d.retryableCodes : []
-      if (cur.includes(code)) { setAddMsg({ kind: 'dup', code }); return d }
-      setAddMsg(null)
-      return { ...d, retryableCodes: [...cur, code] }
-    })
+    const cur = codesOf(draft)
+    if (cur.includes(code)) { setAddMsg({ kind: 'dup', code }); return }
+    setAddMsg(null)
+    update('retryableCodes', [...cur, code])
   }
 
   const save = useCallback(async () => {
