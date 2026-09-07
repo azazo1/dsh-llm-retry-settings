@@ -7,12 +7,12 @@
  *    官方 @deepseek-ai/dsh-llm-retry 的 recover 会拿到覆盖后的策略——
  *    额外 retryableCodes 与 provider 内置列表并集合并，次数/退避/抖动直接覆盖。
  *    enabled=false（默认）时完全旁路，不改任何东西。
- * 3. autoContinue=true 时监听 `session/event` 的 `turn/end`，凡 reason.kind ===
- *    'max-tokens'（输出 token 上限截断）就替用户补一轮续写：等 `agent.whenIdle()`
- *    之后 `agent.followup()`（时机细节见 handleTurnEnd 注释），
- *    每个会话最多连续 maxContinuations 次。默认关闭。
- *    `agent/status`→idle 是同事件的兜底触发（回看 session.log 取原因），两条路径
- *    按回合号去重，不会双发。
+ * 3. autoContinue=true 时监听 `session/event` 的 `turn/end`. 命中输出截断
+ *    (`max-tokens`), 崩溃孤儿 (`interrupted`), 或瞬时失败 (`error` 且 code/message
+ *    属于可恢复集合, 含 PI_AI_ERROR / JSON 截断) 时, 等 `agent.whenIdle()` 后
+ *    `agent.followup()`. 每个会话最多连续 maxContinuations 次. 默认关闭.
+ *    `agent/status` -> idle 是同事件的兜底触发 (回看 `eventAt` 取原因), 两条路径
+ *    按回合号去重, 不会双发.
  * 4. 运行诊断写 ~/.dsh/logs/dsh-llm-retry-settings/host.log（低频事件，见 diag）。
  */
 
@@ -26,7 +26,7 @@ import z from '@deepseek-ai/schemastery'
 export const name = 'dsh-llm-retry-settings'
 
 /** 诊断构建标记：写进 host.log，用来确认运行中的到底是哪一版 lib/index.js。 */
-const DIAG_TAG = 'v0.1.8'
+const DIAG_TAG = 'v0.2.0'
 
 /**
  * 文件诊断日志：`~/.dsh/logs/dsh-llm-retry-settings/host.log`。
@@ -80,17 +80,43 @@ const NS = 'dsh-llm-retry'
 /** 续写指令：作为 user-role 消息进入模型上下文，故措辞要能独立成立。
  *  source.kind='plugin' 让客户端把它渲染成 inject 上下文行（标签 = NS），
  *  而不是伪装成用户气泡。 */
-const CONTINUATION_TEXT =
-  '上一条回复因达到输出 token 上限被截断。请从中断处直接继续输出，不要重复已经输出的内容，也不要重新开头。'
+const CONTINUATION_MAX_TOKENS =
+  '上一条回复因达到输出 token 上限被截断. 请从中断处直接继续输出, 不要重复已经输出的内容, 也不要重新开头.'
+const CONTINUATION_INTERRUPTED =
+  '上一轮在崩溃后被标记为中断. 请从中断处继续完成任务, 不要重复已经完成的步骤.'
 
-/** 默认补充码：400 reasoning_text（INVALID_REQUEST，OpenAI thinking 模式冲突）与
- *  pi-ai 兜底错误（PI_AI_ERROR，覆盖 STREAM_ERROR 等流式失败）。 */
+function continuationForError(code: string, message: string): string {
+  const brief = message.replace(/\s+/g, ' ').trim().slice(0, 160)
+  const detail = brief ? `${code}: ${brief}` : code
+  return `上一轮因瞬时失败中断 (${detail}). 请从中断处继续完成任务, 不要重复已经完成的步骤.`
+}
+
+/** Same-request retry overlay: HTTP 400 reasoning_text + pi-ai stream fallback. */
 const DEFAULT_RETRYABLE_CODES = ['INVALID_REQUEST', 'PI_AI_ERROR']
 
-/** 全部默认值——schema default、归一化兜底两处共用的唯一事实源（客户端卡片另有镜像）。 */
+/** turn/end error codes that are safe to resume with a followup turn. */
+const TRANSIENT_TURN_ERROR_CODES = new Set([
+  'PI_AI_ERROR',
+  'MALFORMED_RESPONSE',
+  'TRANSPORT',
+  'TIMEOUT',
+  'EMPTY_RESPONSE',
+  'STREAM_CLOSED',
+  'SERVER',
+  'INVALID_RESPONSE',
+  'PI_AI_NOT_WARMED',
+])
+const JSON_FAIL_RE = /unexpected end of json|json\.parse|malformed sse|not valid json|unexpected token/i
+
+function isTransientTurnError(code: string, message: string): boolean {
+  if (TRANSIENT_TURN_ERROR_CODES.has(code)) return true
+  return code === 'UNKNOWN' && JSON_FAIL_RE.test(message)
+}
+
+/** 全部默认值, schema default 与归一化兜底共用 (客户端卡片另有镜像). */
 export const DEFAULTS = {
   enabled: false,
-  maxRetries: 2,
+  maxRetries: 5,
   initialDelayMs: 500,
   maxDelayMs: 10000,
   jitterRatio: 0.1,
@@ -107,9 +133,9 @@ export interface Config {
   jitterRatio: number
   /** 补充到重试码列表的额外 code，与 provider 默认值取并集（不覆盖）。空数组=不补充。 */
   retryableCodes: string[]
-  /** 输出被 token 上限截断时自动补一轮续写。 */
+  /** 输出截断或瞬时 turn/end 失败时自动补一轮续写. */
   autoContinue: boolean
-  /** 单个会话内连续自动续写的次数上限（0 = 永不续写）。 */
+  /** 单个会话内连续自动续写的次数上限 (0 = 永不续写). */
   maxContinuations: number
 }
 
@@ -165,41 +191,63 @@ interface ContinueState {
   lastTurn: number
 }
 
+interface TurnEndInfo {
+  turn: number
+  kind: string
+  code: string
+  message: string
+}
+
 /**
- * 从会话日志尾部找最近一条 `turn/end`。
+ * 从会话日志尾部找最近一条 `turn/end`.
  *
- * 只给 agent/status 兜底路径用：该钩子不带原因，得自己回看日志。最多回看
- * 400 条事件——turn/end 之后紧跟的事件寥寥，再多就说明这个会话不正常，
- * 宁可不续写也不做全量扫描。
+ * 只给 agent/status 兜底路径用: 该钩子不带原因, 得自己回看日志. 最多回看
+ * 400 条事件. 读口走 0.1.2 公开 API (`seq` / `eventAt`), 不再碰私有 `session.log`
+ * (DSH-0.1.2-A4-03).
  */
-function lastTurnEnd(session: any): { turn: number; kind: string } | undefined {
-  const log = session?.log
-  if (!Array.isArray(log)) return undefined
-  for (let i = log.length - 1, floor = Math.max(-1, log.length - 400); i > floor; i -= 1) {
-    const event = log[i]
+function lastTurnEnd(session: any): TurnEndInfo | undefined {
+  if (typeof session?.eventAt !== 'function' || typeof session.seq !== 'number') return undefined
+  const end = session.seq
+  const floor = Math.max(0, end - 400)
+  for (let i = end - 1; i >= floor; i -= 1) {
+    const event = session.eventAt(i)
     if (event?.type !== 'turn/end') continue
+    const reason = event.data?.reason
+    const failure = reason?.error
     return {
       turn: typeof event.data?.turn === 'number' ? event.data.turn : -1,
-      kind: typeof event.data?.reason?.kind === 'string' ? event.data.reason.kind : '',
+      kind: typeof reason?.kind === 'string' ? reason.kind : '',
+      code: typeof failure?.code === 'string' ? failure.code : '',
+      message: typeof failure?.message === 'string' ? failure.message : '',
     }
   }
   return undefined
 }
 
+function shouldAutoContinue(kind: string, code: string, message: string): boolean {
+  if (kind === 'max-tokens' || kind === 'interrupted') return true
+  if (kind === 'error') return isTransientTurnError(code, message)
+  return false
+}
+
+function continuationText(kind: string, code: string, message: string): string {
+  if (kind === 'interrupted') return CONTINUATION_INTERRUPTED
+  if (kind === 'error') return continuationForError(code || 'UNKNOWN', message)
+  return CONTINUATION_MAX_TOKENS
+}
+
 /**
- * 手工构造续写用的 UserMessage。
+ * 手工构造续写用的 UserMessage.
  *
- * 不用 `createUserMessage`（@deepseek-ai/dsh-llm）：宿主 bundle 以 `bundle:true`
- * 构建，引入该包会把整个 dsh-llm 打进来（本插件 package.json 无 dependencies，
- * 运行时也无法按裸标识符解析到它）。产物形状与 createUserMessage({content,source})
- * 一致——id/role/content/source 四字段 + 深冻结，Session.append 的 isJsonValue
- * 运行时校验只要求 JSON 可序列化。
+ * 不用 `createUserMessage` (@deepseek-ai/dsh-llm): 宿主 bundle 以 `bundle:true`
+ * 构建, 引入该包会把整个 dsh-llm 打进来. 产物形状与 createUserMessage({content,source})
+ * 一致: id/role/content/source 四字段 + 深冻结.
  */
-function makeContinuationMessage(): unknown {
+function makeContinuationMessage(text: string): unknown {
   return Object.freeze({
     id: randomUUID(),
     role: 'user',
-    content: Object.freeze([Object.freeze({ type: 'text', text: CONTINUATION_TEXT })]),
+    content: Object.freeze([Object.freeze({ type: 'text', text })]),
     source: Object.freeze({ kind: 'plugin', plugin: NS }),
   })
 }
@@ -300,13 +348,13 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
     { prepend: true },
   )
 
-  // —— 自动续写：输出 token 上限截断的补救 ——
+  // -- auto-continue: max-tokens, crash-orphan interrupted, transient turn/end error --
   //
-  // 为什么不能走 agent/request-error：max-tokens 根本不是错误。适配器把 stop_reason
-  // "length" 映射成 { kind: 'max-tokens' }（dsh-llm-pi-ai/lib/index.js:1371、
-  // dsh-llm-deepseek/lib/index.js:1135），agent-loop 只是结束回合
-  // （dsh-agent-loop/lib/index.js:698 → :570 → :606 append "turn/end"），
-  // 请求本身是成功返回的，所以重试链路永远看不到它。
+  // max-tokens is not an agent/request-error: adapters map stop_reason "length" to
+  // { kind: 'max-tokens' } (dsh-llm-pi-ai/lib/index.js:1333,
+  // dsh-llm-deepseek/lib/index.js:1135). The loop just ends the turn.
+  // Transient JSON/stream failures may also miss the retry waterfall when the
+  // adapter throws instead of finishing with error (UNKNOWN / MALFORMED_RESPONSE).
   //
   // 为什么不在 agent/turn-stopping 里 steer：该钩子 payload 只有 {agent,turn,signal}，
   // 拿不到结束原因，无法区分“正常说完”和“被截断”，steer 会变成无限续写。
@@ -327,23 +375,32 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
   /**
    * 一次 turn/end 的唯一处理入口，两条触发路径共用：
    *  - `session/event`（主路径，带原因）
-   *  - `agent/status` → idle（兜底路径，回看 session.log 找原因）
+   *  - `agent/status` -> idle (fallback, reread via eventAt)
    * 兜底路径的存在理由：本插件是 profile 插件，而 session/event 的派发上下文是
    * sessions 服务自己的 ctx（dsh-session/lib/index.js `emitCtx: this.ctx`）；
    * agent/* 系列钩子则走 agent 的 carrier（`agent/request-error` 已验证可达）。
    * 万一 session/event 到不了本插件，idle 这条还能补上，靠 lastTurn 去重不会双发。
    */
-  const handleTurnEnd = (session: any, turn: number, kind: string, via: string, agentHint?: any): void => {
+  const handleTurnEnd = (
+    session: any,
+    turn: number,
+    kind: string,
+    via: string,
+    agentHint?: any,
+    failure?: { code?: string; message?: string },
+  ): void => {
     const cfg = current()
     const state = stateOf(String(session.id))
     if (state.lastTurn === turn) return
     state.lastTurn = turn
-    if (kind !== 'max-tokens') {
+    const code = typeof failure?.code === 'string' ? failure.code : ''
+    const message = typeof failure?.message === 'string' ? failure.message : ''
+    if (!shouldAutoContinue(kind, code, message)) {
       state.chain = 0
       state.capped = false
       return
     }
-    diag(`turn/end via=${via} session=${session.id} turn=${turn} autoContinue=${cfg.autoContinue} maxContinuations=${cfg.maxContinuations} chain=${state.chain}`)
+    diag(`turn/end via=${via} session=${session.id} turn=${turn} kind=${kind} code=${code || '-'} autoContinue=${cfg.autoContinue} maxContinuations=${cfg.maxContinuations} chain=${state.chain}`)
     if (!cfg.autoContinue) return
     if (state.chain >= cfg.maxContinuations) {
       if (!state.capped) {
@@ -385,24 +442,21 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
     // 两道坑，v0.1.7 的两个版本各踩一道（host.log 全记下来了）：
     //
     // (1) session/event 是在 Session.append() 内部**同步**派发的
-    //     （dsh-session/lib/index.js:1462 → invokeContainedSessionObservers），
-    //     而 append 有重入保护：:1451 置 entry.appending=true，:1442 见已置位即抛
-    //     "session append cannot reenter while another append is being published"。
+    //     (dsh-session/lib/index.js:1435 -> invokeContainedSessionObservers),
+    //     append 有重入保护: :1424 置 entry.appending=true, :1415 见已置位即抛
+    //     "session append cannot reenter while another append is being published".
     //     followup → send → Inbox.splice → Inbox.mutate（dsh-agent/lib/index.js:148）
     //     做的第一件事就是 session.append("agent/inbox/spliced")，
     //     所以在监听器里同步 followup 必然自撞（diag1 版的死法）。
     //
     // (2) 挪进微任务之后死在第二道：turn/end 时驱动还在收尾，phase.kind 仍是
     //     "running"，而 wakeDriver 只在 maintenance / wakeAfterAbort 时才 latch
-    //     wakeRequested（dsh-agent-loop/lib/index.js:458-462），否则直接 return
-    //     ——消息确实插进了 next-turn 队列，唤醒却被丢弃；kick() 收尾时
-    //     :502 的 `if (wakeRequested && this.inbox.hasPending) this.wakeDriver()`
-    //     因此不成立。表现就是「进了排队但永远发不出去」（diag2 版的死法）。
+    //     wakeRequested (dsh-agent-loop/lib/index.js:449-452), 否则直接 return.
+    //     消息插进 next-turn 队列, 唤醒却被丢弃.
     //
-    // 正解是官方给的 whenIdle()：`await this.activityDone` 直到驱动边界 settle
-    // （dsh-agent-loop/lib/index.js:474-479）。kick 的 finally 先 setPhase(idle)
-    // （:498）再 resolve driver，所以那时 phase 已是 idle，这一发
-    // send(wakeup=true) 才会真的开新驱动。
+    // whenIdle() waits activityDone (dsh-agent-loop/lib/index.js:465-469).
+    // kick finally sets phase idle then resolves the driver, so followup
+    // send(wakeup=true) actually opens a new driver.
     state.chain += 1
     const expectedChain = state.chain
     const sessionId = String(session.id)
@@ -417,8 +471,8 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
             diag(`放弃投递 round=${round} via=${via} session=${sessionId} turn=${turn} lastTurn=${state.lastTurn} chain=${state.chain}`)
             return
           }
-          agent.followup(makeContinuationMessage())
-          diag(`续写已投递 round=${round} via=${via} session=${sessionId} turn=${turn} chain=${state.chain}/${cfg.maxContinuations}`)
+          agent.followup(makeContinuationMessage(continuationText(kind, code, message)))
+          diag(`续写已投递 round=${round} via=${via} session=${sessionId} turn=${turn} kind=${kind} chain=${state.chain}/${cfg.maxContinuations}`)
         } catch (error) {
           diag(`续写投递失败 round=${round} via=${via} session=${sessionId} turn=${turn}：${String(error)}`)
           // Inbox.mutate 是先 append 后改本地数组（:148 → :149），重入抛错即未入队，
@@ -455,7 +509,14 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
           case 'turn/end': {
             const reason = event.data && event.data.reason
             if (!reason || typeof reason.kind !== 'string') return
-            handleTurnEnd(session, typeof event.data.turn === 'number' ? event.data.turn : -1, reason.kind, 'session/event')
+            handleTurnEnd(
+              session,
+              typeof event.data.turn === 'number' ? event.data.turn : -1,
+              reason.kind,
+              'session/event',
+              undefined,
+              reason.error,
+            )
             return
           }
           default:
@@ -479,7 +540,10 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
       if (!session || session.id === undefined) return
       const end = lastTurnEnd(session)
       if (!end) return
-      handleTurnEnd(session, end.turn, end.kind, 'agent/status', payload.agent)
+      handleTurnEnd(session, end.turn, end.kind, 'agent/status', payload.agent, {
+        code: end.code,
+        message: end.message,
+      })
     } catch (error) {
       diag(`自动续写处理异常（agent/status）：${String(error)}`)
     }

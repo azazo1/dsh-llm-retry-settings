@@ -1,12 +1,12 @@
 # dsh-llm-retry-settings
 
-A settings card for the DSH LLM auto-retry engine (`@deepseek-ai/dsh-llm-retry`). Tune the retry count and backoff from **Settings → General**; changes take effect immediately. Since 0.1.7 it can also **auto-continue a reply that was cut off by the output-token limit**.
+A settings page for the DSH LLM auto-retry engine (`@deepseek-ai/dsh-llm-retry`). Tune retries from **Settings -> LLM 自动重试**. Since 0.2.0, `autoContinue` also resumes truncated, crash-orphaned, or transient failed turns (`PI_AI_ERROR` / `Unexpected end of JSON input`). Target host: `0.1.2-rc.1`.
 
 [中文说明](./README.zh-CN.md)
 
 ## Features
 
-- **Includes the settings UI** (client bundle `lib/client.js`): a card in **Settings → General** — no separate UI package needed.
+- **Includes the settings UI** (client bundle `lib/client.js`): a **Settings -> LLM 自动重试** section, no extra UI package.
 - Overrides `maxRetries`, `initialDelayMs`, `maxDelayMs`, and `jitterRatio` on the `agent/request-error` retry policy.
 - **New in 0.1.3** — configurable `retryableCodes`: extra failure codes to retry on, **merged** into each provider's own list (never replaces it). Defaults to `INVALID_REQUEST` + `PI_AI_ERROR`, so OpenAI-style HTTP 400 errors (thinking-mode `reasoning_text`) and generic stream failures get retried out of the box.
 - **New in 0.1.8** — auto-continue now actually fires. Two host-side timing traps: `session/event` is dispatched *inside* `Session.append`, so queueing the follow-up straight from the listener died on `session append cannot reenter while another append is being published`; once that was fixed, waking the agent at that moment turned out to be silently dropped by the driver (`wakeDriver` only latches in maintenance/abort), so the message sat in the queue forever. The plugin now waits for `agent.whenIdle()` and re-checks (new turn started / you sent a message / session disposed) before delivering.
@@ -15,7 +15,8 @@ A settings card for the DSH LLM auto-retry engine (`@deepseek-ai/dsh-llm-retry`)
 - **New in 0.1.7** — **auto-continue on output truncation** (`autoContinue`, off by default). Hitting the output-token ceiling is *not* a request failure — the call returns successfully with `finish = max-tokens` — so no retry policy can ever cover it. When enabled, the plugin watches `turn/end` and queues one follow-up continuation turn per truncation, at most `maxContinuations` times in a row (the counter resets when the model finishes normally or you send a new message).
 - **New in 0.1.7** — the error-code chips are grouped into six categories ordered by "will retrying help": transient → rate limit & quota → request & parameters → content & capability → credentials → abort & fallback. Each group shows how many of its codes you selected; picked codes still float to the front *within their own group*.
 - **New in 0.1.5** — selected error codes float to the front of the chip list, with the unselected ones after them; the order inside each group stays fixed, so chips never jump around when you toggle them. (Since 0.1.7 the floating happens within each category group.)
-- Default `enabled: false` = fully bypassed; nothing changes until you enable the override.
+- **0.2.0** targets DSH `0.1.2-rc.1`: `lastTurnEnd` uses `seq` / `eventAt` (DSH-0.1.2-A4-03); default `maxRetries` is 5 again; `autoContinue` covers `max-tokens` / `interrupted` / transient `turn/end error` (including truncated JSON). Declares `peerDependencies.@deepseek-ai/dsh = 0.1.2-rc.1`.
+- Default `enabled: false` = retry overlay bypassed. `autoContinue` is also off by default.
 
 ## Install
 
@@ -42,12 +43,8 @@ mv ~/.dsh/profiles/web/node_modules/package \
 
 The `dsh plugin` command forwards its arguments to `pnpm` in the profile directory:
 
-```bash
-# from a git repo (pnpm clones it; the committed lib/ means no build needed)
-dsh plugin --profile web add github:zeng6125-rgb/dsh-llm-retry-settings
-
-# or from the release tarball URL
-dsh plugin --profile web add https://github.com/zeng6125-rgb/dsh-llm-retry-settings/releases/download/v0.1.8/dsh-llm-retry-settings-0.1.8.tgz
+```shell
+dsh plugin --profile web add github:azazo1/dsh-llm-retry-settings
 ```
 
 Then enable the plugin in the profile: add `"dsh-llm-retry-settings"` to `dsh.profile.bundles` (or use the Desktop plugin-inventory UI) and restart DSH.
@@ -56,11 +53,11 @@ Then enable the plugin in the profile: add `"dsh-llm-retry-settings"` to `dsh.pr
 
 ### Option C — from source
 
-```bash
-git clone https://github.com/zeng6125-rgb/dsh-llm-retry-settings.git
+```shell
+git clone https://github.com/azazo1/dsh-llm-retry-settings.git
 cd dsh-llm-retry-settings
-npm install
-npm run build        # node scripts/build.mjs → lib/index.js + lib/client.js (no DSH checkout needed)
+pnpm install
+pnpm run build
 ```
 
 Link the local build into the profile and register the bundle:
@@ -72,11 +69,10 @@ dsh plugin --profile web link "$PWD"
 
 ## Usage
 
-1. Open DSH **Settings → General**.
-2. Find the **LLM 自动重试** card.
-3. Toggle **开启覆盖** (`enabled`) to apply the override.
-4. Set `maxRetries` / `initialDelayMs` / `maxDelayMs` / `jitterRatio`, pick extra **retryable codes** (chips), and click **保存**.
-5. Optionally toggle **输出截断自动续写** (`autoContinue`) and set its `maxContinuations` cap — independent of the retry override above.
+1. Open DSH **Settings -> LLM 自动重试**.
+2. Toggle **开启覆盖** (`enabled`) to override same-request retries.
+3. Set `maxRetries` / backoff / retryable codes, then **保存**. Default `maxRetries` is 5.
+4. Optionally toggle auto-continue (`autoContinue`) and `maxContinuations`. It covers output truncation, crash orphans, and transient `turn/end` failures such as `PI_AI_ERROR` / truncated JSON.
 
 Changes are written to the `dsh-llm-retry` settings namespace and picked up live by the retry engine.
 

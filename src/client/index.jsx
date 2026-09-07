@@ -36,7 +36,7 @@ function bindSnapshotSelector(scope) {
 // 与宿主 src/index.ts 的 DEFAULTS 镜像（客户端拿不到宿主导出，此处手抄，改动需两处同步）
 const DEFAULTS = {
   enabled: false,
-  maxRetries: 2,
+  maxRetries: 5,
   initialDelayMs: 500,
   maxDelayMs: 10000,
   jitterRatio: 0.1,
@@ -109,13 +109,13 @@ const KNOWN_CODE_SET = new Set(KNOWN_CODES.map((k) => k.code))
 
 const L = {
   title: 'LLM 自动重试',
-  desc: '模型请求失败时的自动恢复策略，以及输出被 token 上限截断时的自动续写。开启重试后以本卡片值为准覆盖各 provider 的重试次数与退避时间。',
+  desc: '模型请求失败时的同一请求重试, 以及回合被截断 / 瞬时失败后的自动续写. 开启重试后以本卡片值为准覆盖各 provider 的重试次数与退避时间.',
   badgeOn: '覆盖已开启',
   badgeOff: '未开启',
   statusOff: '沿用各 provider 自带的重试策略',
   statusOn: (n, init, max, j, c) => `最多重试 ${n} 次 · 退避 ${init}ms→${max}ms · 抖动 ${j} · 补充 ${c} 个错误码`,
-  continueOn: (n) => `截断自动续写 ≤${n} 次`,
-  continueOff: '截断不自动续写',
+  continueOn: (n) => `截断/瞬时失败自动续写 <=${n} 次`,
+  continueOff: '不自动续写',
   groupBehavior: '重试行为',
   fieldRetries: '最大重试次数',
   fieldRetriesHint: '失败后最多重试几次；0 = 不重试',
@@ -132,16 +132,17 @@ const L = {
   codesClear: '清空',
   codesCustom: '自定义',
   codesCustomHint: '不在已知清单内（provider 配置手工加的）',
-  groupContinue: '输出截断自动续写',
+  groupContinue: '截断与瞬时失败自动续写',
   switchOn: '开启',
   switchOff: '关闭',
-  continueHint: '回答被输出 token 上限截断时（宿主会显示「已达到输出 token 上限」），自动替你发一条「继续」，'
-    + '模型接着上文往下写。这不是请求失败，上面的重试策略管不到它；两者互不影响。',
+  continueHint: '回合以输出截断 (max-tokens), 崩溃孤儿 (interrupted), 或瞬时失败结束时 '
+    + '(PI_AI_ERROR / Unexpected end of JSON input / TRANSPORT 等), 自动替你发一条继续. '
+    + '鉴权/额度/主动取消不会续写. 与上方同一请求重试互不影响.',
   continueWarn: '每次续写都会带着完整上下文再跑一轮，会额外消耗 token。',
   continueLog: '宿主半边把关键决策写进 ~/.dsh/logs/dsh-llm-retry-settings/host.log，没自动续写时先看它。',
   continueZero: '次数为 0：开关虽开，实际不会补写任何一轮。',
   fieldMaxContinue: '最多连续续写',
-  fieldMaxContinueHint: '同一次截断后连续补写的次数上限；模型正常说完或你重新发言即重新计数',
+  fieldMaxContinueHint: '连续补写次数上限; 模型正常说完或你重新发言即重新计数',
   suffixTimes: '次',
   suffixMs: 'ms',
   save: '保存',
@@ -488,8 +489,8 @@ function RetrySettingsRow({ useScope, scope }) {
           </div>
         </div>
 
-        {/* 自动续写与重试是两条独立通路：max-tokens 不是错误，重试策略永远碰不到它，
-            所以这里的开关不受上方 enabled 影响，也不随上方一起置灰。 */}
+        {/* autoContinue is independent of enabled: max-tokens / thrown JSON errors
+            never enter agent/request-error, so the retry overlay cannot cover them. */}
         <div className="dlr-section">
           <div className="dlr-switchRow">
             <Switch

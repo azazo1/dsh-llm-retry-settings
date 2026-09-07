@@ -1,12 +1,12 @@
 # dsh-llm-retry-settings
 
-DSH「LLM 自动重试」设置卡片：在 **设置 → General** 里调整自动重试的次数与退避时间，宿主 `@deepseek-ai/dsh-llm-retry` 实时生效。0.1.7 起还能**在回答被输出 token 上限截断时自动续写**。
+DSH "LLM 自动重试" 设置页: 在 **设置 -> LLM 自动重试** 调整同一请求重试 (次数 / 退避 / 错误码), 宿主 `@deepseek-ai/dsh-llm-retry` 实时生效. 0.2.0 起 `autoContinue` 还会在输出截断, 崩溃孤儿, 或瞬时失败 (`PI_AI_ERROR` / `Unexpected end of JSON input` 等) 后自动续写. 目标宿主 `0.1.2-rc.1`.
 
 [English](./README.md)
 
 ## 功能
 
-- **自带设置 UI**（客户端 bundle `lib/client.js`）：一张位于 **设置 → General** 的卡片，无需另外装 UI 包。
+- **自带设置 UI** (客户端 bundle `lib/client.js`): 独立分区 **设置 -> LLM 自动重试**, 无需另外装 UI 包.
 - 覆盖 `agent/request-error` 重试策略中的 `maxRetries`、`initialDelayMs`、`maxDelayMs`、`jitterRatio`。
 - **0.1.3 新增** `retryableCodes`：可勾选的额外重试错误码，与各 provider 自带列表 **合并（去重）而非替换**。默认补入 `INVALID_REQUEST` + `PI_AI_ERROR`，开箱即重试 OpenAI 式 HTTP 400（thinking 模式 `reasoning_text`）与流式失败兜底码。
 - **0.1.8 修复** 自动续写现在真的会发出去了。宿主半边两道时机坑：`session/event` 是在 `Session.append` **内部**同步派发的，在监听器里直接排续写会撞 `session append cannot reenter while another append is being published`；绕开之后又发现此刻唤醒 agent 会被驱动静默丢弃（`wakeDriver` 只在 maintenance/abort 下才 latch），消息就永远卡在队列里。现在改成先 `await agent.whenIdle()` 再投递，投递前复核（已开新回合 / 你重新发言 / 会话已 dispose 则放弃）。
@@ -15,7 +15,8 @@ DSH「LLM 自动重试」设置卡片：在 **设置 → General** 里调整自�
 - **0.1.7 新增** **输出截断自动续写**（`autoContinue`，默认关闭）。撞到输出 token 上限**不是请求失败**——请求是成功返回的，只是 `finish = max-tokens`——所以任何重试策略都管不到它。开启后本插件监听 `turn/end`，每次截断补一轮续写，最多连续 `maxContinuations` 次（模型正常说完或你重新发言即重新计数）。
 - **0.1.7 新增** 错误码 chip 按「重试有没有恢复价值」分六组：瞬时故障 → 限流与配额 → 请求与参数 → 内容与能力 → 凭证与鉴权 → 取消与兜底，组标题上标出该组已选数量；已选中的码仍在**自己那一组内**靠前。
 - **0.1.5 新增** 已选中的错误码自动靠前，未选中的排在其后；组内顺序固定，勾选时 chip 不会乱跳。（0.1.7 起改为在各分组内部靠前。）
-- 默认 `enabled: false` = 完全旁路：不开启覆盖时，不改动任何东西。
+- **0.2.0** 适配 DSH `0.1.2-rc.1`: `lastTurnEnd` 改走 `seq` / `eventAt` (DSH-0.1.2-A4-03); `maxRetries` 默认改回 5 (不再盖掉官方默认); `autoContinue` 覆盖 `max-tokens` / `interrupted` / 瞬时 `turn/end error` (含 JSON 截断). 声明 `peerDependencies.@deepseek-ai/dsh = 0.1.2-rc.1`.
+- 默认 `enabled: false` = 完全旁路: 不开启覆盖时, 不改同一请求重试. `autoContinue` 同样默认关闭.
 
 ## 安装
 
@@ -41,12 +42,8 @@ mv ~/.dsh/profiles/web/node_modules/package \
 
 `dsh plugin` 命令会把参数转发给 profile 目录里的 `pnpm`：
 
-```bash
-# 从 git 仓库安装（pnpm 会 clone；lib/ 已提交，无需构建）
-dsh plugin --profile web add github:zeng6125-rgb/dsh-llm-retry-settings
-
-# 或从 release tarball 地址安装
-dsh plugin --profile web add https://github.com/zeng6125-rgb/dsh-llm-retry-settings/releases/download/v0.1.8/dsh-llm-retry-settings-0.1.8.tgz
+```shell
+dsh plugin --profile web add github:azazo1/dsh-llm-retry-settings
 ```
 
 装完还需要在 profile 里启用：把 `"dsh-llm-retry-settings"` 加进 `dsh.profile.bundles`（或使用 Desktop 的插件管理 UI），然后重启 DSH。
@@ -55,11 +52,11 @@ dsh plugin --profile web add https://github.com/zeng6125-rgb/dsh-llm-retry-setti
 
 ### 方式 C —— 源码
 
-```bash
-git clone https://github.com/zeng6125-rgb/dsh-llm-retry-settings.git
+```shell
+git clone https://github.com/azazo1/dsh-llm-retry-settings.git
 cd dsh-llm-retry-settings
-npm install
-npm run build        # node scripts/build.mjs → lib/index.js + lib/client.js（不需要 DSH 源码树）
+pnpm install
+pnpm run build
 ```
 
 把本地构建 link 进 profile 并注册 bundle：
@@ -71,11 +68,10 @@ dsh plugin --profile web link "$PWD"
 
 ## 使用
 
-1. 打开 DSH **设置 → General**。
-2. 找到 **LLM 自动重试** 卡片。
-3. 打开 **开启覆盖**（`enabled`）。
-4. 设置 `maxRetries` / `initialDelayMs` / `maxDelayMs` / `jitterRatio`，按需点选 **可重试错误码** chip，点 **保存**。
-5. 需要的话打开**输出截断自动续写**（`autoContinue`）并设置 `maxContinuations` 上限——它与上面的重试覆盖互不影响。
+1. 打开 DSH **设置 -> LLM 自动重试**.
+2. 打开 **开启覆盖** (`enabled`) 才会改同一请求重试.
+3. 设置 `maxRetries` / 退避 / 可重试错误码, 点 **保存**. 默认 `maxRetries` 为 5.
+4. 需要的话打开 **截断与瞬时失败自动续写** (`autoContinue`) 并设置 `maxContinuations`. 它覆盖输出截断, 崩溃孤儿, 以及 `PI_AI_ERROR` / JSON 截断这类瞬时 `turn/end` 失败.
 
 改动会写入 `dsh-llm-retry` 设置命名空间，重试引擎实时生效。
 
