@@ -11,6 +11,10 @@
  *    'max-tokens'（输出 token 上限截断）就替用户补一轮续写：等 `agent.whenIdle()`
  *    之后 `agent.followup()`（时机细节见 handleTurnEnd 注释），
  *    每个会话最多连续 maxContinuations 次。默认关闭。
+ *    续写指令按截断点分两种（见 visibleTextBeforeTurnEnd）：回合里有可见正文
+ *    → 接着写；只有思考块（正文 0 字，上限在 reasoning 阶段就撞上）→ 没有可接
+ *    的正文，改请模型直接作答——对纯思考截断说「从中断处继续」，实测模型只会
+ *    把任务从头重做。
  *    `agent/status`→idle 是同事件的兜底触发（回看 session.log 取原因），两条路径
  *    按回合号去重，不会双发。
  * 4. 运行诊断写 ~/.dsh/logs/dsh-llm-retry-settings/host.log（低频事件，见 diag）。
@@ -80,8 +84,17 @@ const NS = 'dsh-llm-retry'
 /** 续写指令：作为 user-role 消息进入模型上下文，故措辞要能独立成立。
  *  source.kind='plugin' 让客户端把它渲染成 inject 上下文行（标签 = NS），
  *  而不是伪装成用户气泡。 */
-const CONTINUATION_TEXT =
+/** 有正文可接时的续写指令：截断前模型已输出可见文本，模型历史里就有接续锚点。 */
+const CONTINUATION_TEXT_RESUME =
   '上一条回复因达到输出 token 上限被截断。请从中断处直接继续输出，不要重复已经输出的内容，也不要重新开头。'
+
+/** 无正文可接时的续写指令（纯思考截断：历史里只有 reasoning 块，没有可见文本）。
+ *  此时「从中断处继续输出」对模型无从谈起——接续点只存在于被截断的思考流里，
+ *  实测模型只会把任务从头重做；正确做法是请它别再重铺思考、基于已有上下文作答。
+ *  截断的思考块本身仍在历史里（dsh-llm-deepseek serializeAssistant 会把
+ *  reasoning_content 原样回传），所以「基于已有上下文」是成立的。 */
+const CONTINUATION_TEXT_ANSWER =
+  '上一条回复在思考阶段就达到了输出 token 上限，还没有输出任何可见正文。请基于上面已有的上下文直接输出最终回答，不要重新进行长篇思考。'
 
 /** 默认补充码：400 reasoning_text（INVALID_REQUEST，OpenAI thinking 模式冲突）与
  *  pi-ai 兜底错误（PI_AI_ERROR，覆盖 STREAM_ERROR 等流式失败）。 */
@@ -195,13 +208,40 @@ function lastTurnEnd(session: any): { turn: number; kind: string } | undefined {
  * 一致——id/role/content/source 四字段 + 深冻结，Session.append 的 isJsonValue
  * 运行时校验只要求 JSON 可序列化。
  */
-function makeContinuationMessage(): unknown {
+function makeContinuationMessage(text: string): unknown {
   return Object.freeze({
     id: randomUUID(),
     role: 'user',
-    content: Object.freeze([Object.freeze({ type: 'text', text: CONTINUATION_TEXT })]),
+    content: Object.freeze([Object.freeze({ type: 'text', text })]),
     source: Object.freeze({ kind: 'plugin', plugin: NS }),
   })
+}
+
+/**
+ * 回合内模型有没有输出过可见正文（text 块非空）。
+ *
+ * max-tokens 有两种截然不同的截断点（实测 session.v2 日志各一例）：
+ *  - 正文被截断（text 有内容）→ 「从中断处继续」有效，模型有锚点可接；
+ *  - 思考被截断（只有 reasoning 块，text 全程为空）→ 历史里根本没有可见的
+ *    「中断处」，模型无从接起，只会从头重做。两种情况必须发不同的续写指令。
+ *
+ * 在 session.log 里按 seq 倒序找：从 turn/end 往回到同回合的 turn/start 为止，
+ * 检查 assistant/message 的 content。找不到 turn/start 就全量扫，宁可慢不可错。
+ * 事件对象来自内存 session.log（仅兜底路径）或 event 引用（主路径不调本函数），
+ * 都不落盘解析，无性能顾虑。
+ */
+function visibleTextBeforeTurnEnd(session: any, turn: number): boolean {
+  const log = session?.log
+  if (!Array.isArray(log)) return true
+  const hasText = (content: any): boolean =>
+    Array.isArray(content) && content.some((part: any) => part?.type === 'text' && typeof part.text === 'string' && part.text.trim() !== '')
+  for (let i = log.length - 1, floor = Math.max(-1, log.length - 800); i > floor; i -= 1) {
+    const event = log[i]
+    if (!event || typeof event.type !== 'string') continue
+    if (event.type === 'turn/start' && event.data?.turn === turn) return false
+    if (event.type === 'assistant/message' && hasText(event.data?.message?.content ?? event.data?.content)) return true
+  }
+  return false
 }
 
 export function apply(ctx: Context, config: Partial<Config> | undefined): void {
@@ -403,6 +443,10 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
     // （dsh-agent-loop/lib/index.js:474-479）。kick 的 finally 先 setPhase(idle)
     // （:498）再 resolve driver，所以那时 phase 已是 idle，这一发
     // send(wakeup=true) 才会真的开新驱动。
+    // 截断点分型：回合里有可见正文 → 接着写；只有思考块 → 请直接作答。
+    // 判定必须发生在投递前、且用当前 session.log（两处都满足：主路径同步收到
+    // turn/end 时该回合全部事件已入 log；兜底路径 idle 时更齐）。
+    const hasVisibleText = visibleTextBeforeTurnEnd(session, turn)
     state.chain += 1
     const expectedChain = state.chain
     const sessionId = String(session.id)
@@ -417,8 +461,8 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
             diag(`放弃投递 round=${round} via=${via} session=${sessionId} turn=${turn} lastTurn=${state.lastTurn} chain=${state.chain}`)
             return
           }
-          agent.followup(makeContinuationMessage())
-          diag(`续写已投递 round=${round} via=${via} session=${sessionId} turn=${turn} chain=${state.chain}/${cfg.maxContinuations}`)
+          agent.followup(makeContinuationMessage(hasVisibleText ? CONTINUATION_TEXT_RESUME : CONTINUATION_TEXT_ANSWER))
+          diag(`续写已投递 round=${round} via=${via} session=${sessionId} turn=${turn} mode=${hasVisibleText ? 'resume' : 'answer'} chain=${state.chain}/${cfg.maxContinuations}`)
         } catch (error) {
           diag(`续写投递失败 round=${round} via=${via} session=${sessionId} turn=${turn}：${String(error)}`)
           // Inbox.mutate 是先 append 后改本地数组（:148 → :149），重入抛错即未入队，
