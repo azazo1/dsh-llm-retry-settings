@@ -43,6 +43,7 @@ const DEFAULTS = {
   retryableCodes: ['INVALID_REQUEST', 'PI_AI_ERROR'],
   autoContinue: false,
   maxContinuations: 2,
+  continuationPrompt: '',
 }
 
 // 已知错误码全集：核心 dsh-llm 规范码 + pi-ai/deepseek 两个适配器可能产出的全部
@@ -137,8 +138,8 @@ const L = {
   codesCustomChip: '自定义错误码，点击取消勾选',
   codesAddPlaceholder: '输入自定义错误码，如 MY_PROVIDER_BUSY',
   codesAddBtn: '添加',
-    codesAddDup: (c) => `已勾选或已存在：${c}`,
-    codesAddBad: (c) => `${c} 含空白或非法字符（仅限 A-Z 0-9 _ - .）`,
+  codesAddDup: (c) => `已勾选或已存在：${c}`,
+  codesAddBad: (c) => `${c} 含空白或非法字符（仅限 A-Z 0-9 _ - .）`,
   groupContinue: '输出截断自动续写',
   switchOn: '开启',
   switchOff: '关闭',
@@ -149,6 +150,11 @@ const L = {
   continueZero: '次数为 0：开关虽开，实际不会补写任何一轮。',
   fieldMaxContinue: '最多连续续写',
   fieldMaxContinueHint: '同一次截断后连续补写的次数上限；模型正常说完或你重新发言即重新计数',
+  fieldPrompt: '续写提示词',
+  fieldPromptHint: '截断后自动发给模型的那句话。留空用内置默认文案（「请从中断处直接继续输出…」）；不同 provider/model 吃不同的说法，这里可以按需改写。',
+  fieldPromptPlaceholder: '留空 = 使用内置默认文案',
+  fieldPromptDefault: '当前使用内置默认文案',
+  fieldPromptCustom: '当前使用自定义文案',
   suffixTimes: '次',
   suffixMs: 'ms',
   save: '保存',
@@ -197,6 +203,10 @@ const CSS = [
   '.dlr-input{width:100%;box-sizing:border-box;height:32px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:13px;outline:none}',
   '.dlr-input:focus{border-color:var(--dsw-alias-state-business-primary)}',
   '.dlr-input:disabled{opacity:.5}',
+  // 多行文本框（续写提示词）：继承 .dlr-input 的配色，只改高度与内边距
+  '.dlr-textarea{width:100%;box-sizing:border-box;min-height:72px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:13px;line-height:19px;font-family:inherit;resize:vertical;outline:none}',
+  '.dlr-textarea:focus{border-color:var(--dsw-alias-state-business-primary)}',
+  '.dlr-textarea:disabled{opacity:.5}',
 
   '.dlr-chipsWrap{display:flex;flex-direction:column;gap:10px;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px}',
   '.dlr-chipOuter{display:flex;flex-direction:column;gap:6px}',
@@ -294,6 +304,24 @@ function NumberField({ label, hint, value, min, max, step, disabled, dirty, onCh
           onChange(float ? clampNum(n, min, max) : clampInt(n, min))
         }}
         onKeyDown={(e) => { if (e.key === 'Enter') onEnter() }}
+      />
+      <span className="dlr-cellHint">{hint}</span>
+    </div>
+  )
+}
+
+function PromptField({ label, hint, value, placeholder, disabled, dirty, onChange }) {
+  return (
+    <div className={'dlr-cell' + (dirty ? ' dirty' : '')}>
+      <div className="dlr-cellHead">
+        <span className="dlr-cellLabel">{label}</span>
+      </div>
+      <textarea
+        className="dlr-textarea"
+        value={value}
+        placeholder={placeholder}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
       />
       <span className="dlr-cellHint">{hint}</span>
     </div>
@@ -404,6 +432,7 @@ function CodeChips({ selected, disabled, onToggle, onClear, onAdd }) {
   )
 }
 
+const strOr = (v, d) => (typeof v === 'string' ? v : d)
 const numOr = (v, d) => (typeof v === 'number' ? v : d)
 const normCodes = (v) => (Array.isArray(v) ? v : []).filter((c) => typeof c === 'string' && c.length > 0)
 
@@ -418,6 +447,7 @@ function projectValue(value) {
     retryableCodes: normCodes(value.retryableCodes),
     autoContinue: value.autoContinue === true,
     maxContinuations: numOr(value.maxContinuations, DEFAULTS.maxContinuations),
+    continuationPrompt: strOr(value.continuationPrompt, DEFAULTS.continuationPrompt),
   }
 }
 
@@ -571,14 +601,26 @@ function RetrySettingsRow({ useScope, scope }) {
             <div className="dlr-grid">
               <NumberField label={L.fieldMaxContinue} hint={L.fieldMaxContinueHint} value={draft.maxContinuations}
                 min={0} step={1} suffix={L.suffixTimes}
-                disabled={!writable} dirty={draft.maxContinuations !== current.maxContinuations}
+                disabled={!writable || !draft.autoContinue} dirty={draft.maxContinuations !== current.maxContinuations}
                 onChange={(n) => update('maxContinuations', n)} onEnter={save} />
             </div>
             {draft.autoContinue && draft.maxContinuations === 0 && (
               <span className="dlr-note">{L.continueZero}</span>
             )}
+            <PromptField
+              label={L.fieldPrompt}
+              hint={L.fieldPromptHint}
+              value={draft.continuationPrompt}
+              placeholder={L.fieldPromptPlaceholder}
+              disabled={!writable || !draft.autoContinue}
+              dirty={draft.continuationPrompt !== current.continuationPrompt}
+              onChange={(v) => update('continuationPrompt', v)}
+            />
+            <span className="dlr-note">
+              {draft.continuationPrompt.trim() === '' ? L.fieldPromptDefault : L.fieldPromptCustom}
+            </span>
             {draft.autoContinue && <span className="dlr-note">{L.continueWarn}</span>}
-          {draft.autoContinue && <span className="dlr-note">{L.continueLog}</span>}
+            {draft.autoContinue && <span className="dlr-note">{L.continueLog}</span>}
           </div>
         </div>
       </div>

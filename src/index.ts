@@ -11,10 +11,8 @@
  *    'max-tokens'（输出 token 上限截断）就替用户补一轮续写：等 `agent.whenIdle()`
  *    之后 `agent.followup()`（时机细节见 handleTurnEnd 注释），
  *    每个会话最多连续 maxContinuations 次。默认关闭。
- *    续写指令按截断点分两种（见 visibleTextBeforeTurnEnd）：回合里有可见正文
- *    → 接着写；只有思考块（正文 0 字，上限在 reasoning 阶段就撞上）→ 没有可接
- *    的正文，改请模型直接作答——对纯思考截断说「从中断处继续」，实测模型只会
- *    把任务从头重做。
+ *    续写指令来自设置页的 `continuationPrompt`：用户可按自己的 provider/model
+ *    自定义；为空时使用内置默认文案，并对所有自动续写场景生效。
  *    `agent/status`→idle 是同事件的兜底触发（回看 session.log 取原因），两条路径
  *    按回合号去重，不会双发。
  * 4. 运行诊断写 ~/.dsh/logs/dsh-llm-retry-settings/host.log（低频事件，见 diag）。
@@ -81,20 +79,9 @@ export const inject = ['settings', 'agents', 'sessions']
 
 const NS = 'dsh-llm-retry'
 
-/** 续写指令：作为 user-role 消息进入模型上下文，故措辞要能独立成立。
- *  source.kind='plugin' 让客户端把它渲染成 inject 上下文行（标签 = NS），
- *  而不是伪装成用户气泡。 */
-/** 有正文可接时的续写指令：截断前模型已输出可见文本，模型历史里就有接续锚点。 */
-const CONTINUATION_TEXT_RESUME =
+/** 默认续写指令：用户可在设置页以 continuationPrompt 覆盖。 */
+const DEFAULT_CONTINUATION_PROMPT =
   '上一条回复因达到输出 token 上限被截断。请从中断处直接继续输出，不要重复已经输出的内容，也不要重新开头。'
-
-/** 无正文可接时的续写指令（纯思考截断：历史里只有 reasoning 块，没有可见文本）。
- *  此时「从中断处继续输出」对模型无从谈起——接续点只存在于被截断的思考流里，
- *  实测模型只会把任务从头重做；正确做法是请它别再重铺思考、基于已有上下文作答。
- *  截断的思考块本身仍在历史里（dsh-llm-deepseek serializeAssistant 会把
- *  reasoning_content 原样回传），所以「基于已有上下文」是成立的。 */
-const CONTINUATION_TEXT_ANSWER =
-  '上一条回复在思考阶段就达到了输出 token 上限，还没有输出任何可见正文。请基于上面已有的上下文直接输出最终回答，不要重新进行长篇思考。'
 
 /** 默认补充码：400 reasoning_text（INVALID_REQUEST，OpenAI thinking 模式冲突）与
  *  pi-ai 兜底错误（PI_AI_ERROR，覆盖 STREAM_ERROR 等流式失败）。 */
@@ -110,6 +97,7 @@ export const DEFAULTS = {
   retryableCodes: [...DEFAULT_RETRYABLE_CODES],
   autoContinue: false,
   maxContinuations: 2,
+  continuationPrompt: '',
 } as const
 
 export interface Config {
@@ -124,6 +112,8 @@ export interface Config {
   autoContinue: boolean
   /** 单个会话内连续自动续写的次数上限（0 = 永不续写）。 */
   maxContinuations: number
+  /** 自动续写发送给模型的提示词；空字符串表示使用 DEFAULT_CONTINUATION_PROMPT。 */
+  continuationPrompt: string
 }
 
 export const Config = z.object({
@@ -135,6 +125,7 @@ export const Config = z.object({
   retryableCodes: z.array(z.string()).default([...DEFAULT_RETRYABLE_CODES]),
   autoContinue: z.boolean().default(DEFAULTS.autoContinue),
   maxContinuations: z.number().step(1).min(0).default(DEFAULTS.maxContinuations),
+  continuationPrompt: z.string().default(DEFAULTS.continuationPrompt),
 })
 
 // —— 归一化：schema 之外的第二道防线（settings base 传入的是未校验裸值）——
@@ -149,20 +140,35 @@ const asInt = (v: unknown, min: number): number | undefined =>
 const asFloat = (v: unknown, min: number, max: number): number | undefined =>
   typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : undefined
 
-/** 裸值收敛成合法 Config：越界夹紧、类型不符回退默认、非法码过滤、退避下限封顶。 */
-function normalizeConfig(raw: Partial<Config> | undefined | null): Config {
+/** DEFAULTS 的 Config 视图：DEFAULTS 是 as const，数组需先解掉 readonly 才能当回退值。 */
+const DEFAULTS_CONFIG: Config = { ...DEFAULTS, retryableCodes: [...DEFAULTS.retryableCodes] }
+
+/**
+ * 字段级收敛的唯一实现：raw 中类型合法的字段覆盖 fallback，其余保留 fallback。
+ *
+ * 两个调用点共用这一张字段表，新增字段只改这里一处，不会再出现「改了
+ * normalizeConfig 忘了 syncFromScope」的漏改（v0.1.7 首发版正是这么漏的）。
+ * 越界夹紧、类型不符回退、非法码过滤、退避下限封顶都在此统一完成。
+ */
+function coerceConfig(raw: Partial<Config> | undefined | null, fallback: Config): Config {
   const cfg: Config = {
-    enabled: asBool(raw?.enabled) ?? DEFAULTS.enabled,
-    maxRetries: asInt(raw?.maxRetries, 0) ?? DEFAULTS.maxRetries,
-    initialDelayMs: asInt(raw?.initialDelayMs, 1) ?? DEFAULTS.initialDelayMs,
-    maxDelayMs: asInt(raw?.maxDelayMs, 1) ?? DEFAULTS.maxDelayMs,
-    jitterRatio: asFloat(raw?.jitterRatio, 0, 1) ?? DEFAULTS.jitterRatio,
-    retryableCodes: Array.isArray(raw?.retryableCodes) ? normCodes(raw.retryableCodes) : [...DEFAULT_RETRYABLE_CODES],
-    autoContinue: asBool(raw?.autoContinue) ?? DEFAULTS.autoContinue,
-    maxContinuations: asInt(raw?.maxContinuations, 0) ?? DEFAULTS.maxContinuations,
+    enabled: asBool(raw?.enabled) ?? fallback.enabled,
+    maxRetries: asInt(raw?.maxRetries, 0) ?? fallback.maxRetries,
+    initialDelayMs: asInt(raw?.initialDelayMs, 1) ?? fallback.initialDelayMs,
+    maxDelayMs: asInt(raw?.maxDelayMs, 1) ?? fallback.maxDelayMs,
+    jitterRatio: asFloat(raw?.jitterRatio, 0, 1) ?? fallback.jitterRatio,
+    retryableCodes: Array.isArray(raw?.retryableCodes) ? normCodes(raw.retryableCodes) : [...fallback.retryableCodes],
+    autoContinue: asBool(raw?.autoContinue) ?? fallback.autoContinue,
+    maxContinuations: asInt(raw?.maxContinuations, 0) ?? fallback.maxContinuations,
+    continuationPrompt: typeof raw?.continuationPrompt === 'string' ? raw.continuationPrompt : fallback.continuationPrompt,
   }
   if (cfg.initialDelayMs > cfg.maxDelayMs) cfg.initialDelayMs = cfg.maxDelayMs
   return cfg
+}
+
+/** 裸值收敛成合法 Config（回退值取内置默认）。 */
+function normalizeConfig(raw: Partial<Config> | undefined | null): Config {
+  return coerceConfig(raw, DEFAULTS_CONFIG)
 }
 
 /** 一个会话的自动续写账本。 */
@@ -218,17 +224,21 @@ function makeContinuationMessage(text: string): unknown {
 }
 
 /**
- * 回合内模型有没有输出过可见正文（text 块非空）。
+ * 回合内模型有没有输出过可见正文（text 块非空）——**仅供诊断**。
  *
- * max-tokens 有两种截然不同的截断点（实测 session.v2 日志各一例）：
- *  - 正文被截断（text 有内容）→ 「从中断处继续」有效，模型有锚点可接；
- *  - 思考被截断（只有 reasoning 块，text 全程为空）→ 历史里根本没有可见的
- *    「中断处」，模型无从接起，只会从头重做。两种情况必须发不同的续写指令。
+ * max-tokens 的截断点有两种（实测 session.v2 日志两类都出现过）：
+ *  - 正文被截断（text 有内容）→ 历史里有可见的「中断处」；
+ *  - 思考被截断（只有 reasoning 块，text 全程为空）→ 可见中断处不存在。
+ *
+ * 曾据此发两种不同的续写指令，**已废弃**：全量对比 75 个手动停止样本，其中
+ * 45 个同样没有正文，却照样能接上；真正决定能否接上的是 provider/model 中转
+ * 是否回显上一段思考，与本函数无关。故这里只把 text=yes/no 写进 host.log，
+ * 供用户自定义续写提示词时判断措辞。
  *
  * 在 session.log 里按 seq 倒序找：从 turn/end 往回到同回合的 turn/start 为止，
- * 检查 assistant/message 的 content。找不到 turn/start 就全量扫，宁可慢不可错。
- * 事件对象来自内存 session.log（仅兜底路径）或 event 引用（主路径不调本函数），
- * 都不落盘解析，无性能顾虑。
+ * 检查 assistant/message 的 content。找不到 turn/start 就继续往前扫（最多 800
+ * 条）。拿不到 log（非数组）时返回 true——诊断字段宁可信其有。
+ * 事件对象来自内存 session.log，不落盘解析，无性能顾虑。
  */
 function visibleTextBeforeTurnEnd(session: any, turn: number): boolean {
   const log = session?.log
@@ -264,22 +274,10 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
     return live
   }
 
-  // scope.watch 回调：字段级叠加——给出且类型合法的字段才覆盖，其余保留现值
+  // scope.watch 回调 / 事件时刻重读：字段级叠加——给出且类型合法的字段才覆盖，其余保留现值
   const syncFromScope = (next: Partial<Config> | undefined | null): void => {
     if (!next || typeof next !== 'object') return
-    Object.assign(
-      live,
-      normalizeConfig({
-        enabled: asBool(next.enabled) ?? live.enabled,
-        maxRetries: asInt(next.maxRetries, 0) ?? live.maxRetries,
-        initialDelayMs: asInt(next.initialDelayMs, 1) ?? live.initialDelayMs,
-        maxDelayMs: asInt(next.maxDelayMs, 1) ?? live.maxDelayMs,
-        jitterRatio: asFloat(next.jitterRatio, 0, 1) ?? live.jitterRatio,
-        retryableCodes: Array.isArray(next.retryableCodes) ? next.retryableCodes : live.retryableCodes,
-        autoContinue: asBool(next.autoContinue) ?? live.autoContinue,
-        maxContinuations: asInt(next.maxContinuations, 0) ?? live.maxContinuations,
-      }),
-    )
+    Object.assign(live, coerceConfig(next, live))
   }
 
   // 与 dsh-thinking-compact 同款：ctx.inject(['settings']) + settings.register 直连，
@@ -443,7 +441,8 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
     // （dsh-agent-loop/lib/index.js:474-479）。kick 的 finally 先 setPhase(idle)
     // （:498）再 resolve driver，所以那时 phase 已是 idle，这一发
     // send(wakeup=true) 才会真的开新驱动。
-    // 截断点分型：回合里有可见正文 → 接着写；只有思考块 → 请直接作答。
+    // 截断点分型只用于诊断（text=yes/no）：截断发生在正文之后还是思考阶段，
+    // 直接决定「继续输出」这类措辞能不能成立，是自定义提示词时最该看的一项。
     // 判定必须发生在投递前、且用当前 session.log（两处都满足：主路径同步收到
     // turn/end 时该回合全部事件已入 log；兜底路径 idle 时更齐）。
     const hasVisibleText = visibleTextBeforeTurnEnd(session, turn)
@@ -461,8 +460,10 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
             diag(`放弃投递 round=${round} via=${via} session=${sessionId} turn=${turn} lastTurn=${state.lastTurn} chain=${state.chain}`)
             return
           }
-          agent.followup(makeContinuationMessage(hasVisibleText ? CONTINUATION_TEXT_RESUME : CONTINUATION_TEXT_ANSWER))
-          diag(`续写已投递 round=${round} via=${via} session=${sessionId} turn=${turn} mode=${hasVisibleText ? 'resume' : 'answer'} chain=${state.chain}/${cfg.maxContinuations}`)
+          const custom = cfg.continuationPrompt.trim()
+          const prompt = custom || DEFAULT_CONTINUATION_PROMPT
+          agent.followup(makeContinuationMessage(prompt))
+          diag(`续写已投递 round=${round} via=${via} session=${sessionId} turn=${turn} prompt=${custom ? 'custom' : 'default'} text=${hasVisibleText ? 'yes' : 'no'} chain=${state.chain}/${cfg.maxContinuations}`)
         } catch (error) {
           diag(`续写投递失败 round=${round} via=${via} session=${sessionId} turn=${turn}：${String(error)}`)
           // Inbox.mutate 是先 append 后改本地数组（:148 → :149），重入抛错即未入队，
