@@ -8,6 +8,9 @@ A settings card for the DSH LLM auto-retry engine (`@deepseek-ai/dsh-llm-retry`)
 
 - **Includes the settings UI** (client bundle `lib/client.js`): a card in **Settings → General** — no separate UI package needed.
 - Overrides `maxRetries`, `initialDelayMs`, `maxDelayMs`, and `jitterRatio` on the `agent/request-error` retry policy.
+- **New in 0.1.10** — a read-only observation panel at the bottom of the card: retried failures, auto-continues, cap hits and skipped rounds, broken down by error code and provider/model, with the live session models (so you can copy the exact model id into an override) and a log-tail viewer.
+- **New in 0.1.10** — per-provider/model overrides: first matching rule wins, `*` wildcards, empty numbers inherit the global values.
+- **New in 0.1.10** — backoff curve with a wait budget, a "continue after retries are exhausted" switch (transient errors only), prompt templates, and a zh/en UI that follows the kernel locale.
 - **New in 0.1.9** — add your own error codes straight from the card (the `自定义` group): type a code a provider throws that is not in the known list (e.g. `MY_PROVIDER_BUSY`) and press **添加**. Input is upper-cased and validated (`A-Z 0-9 _ - .`), duplicates and blanks are rejected with an inline hint, and the code reaches `retryableCodes` unchanged.
 - **New in 0.1.9** — the auto-continue prompt is editable (`continuationPrompt`). Leave it empty to use the built-in wording, or write your own line for relays/models that need different phrasing.
 - **New in 0.1.8** — auto-continue now actually fires. Two host-side timing traps: `session/event` is dispatched *inside* `Session.append`, so queueing the follow-up straight from the listener died on `session append cannot reenter while another append is being published`; once that was fixed, waking the agent at that moment turned out to be silently dropped by the driver (`wakeDriver` only latches in maintenance/abort), so the message sat in the queue forever. The plugin now waits for `agent.whenIdle()` and re-checks (new turn started / you sent a message / session disposed) before delivering.
@@ -26,12 +29,12 @@ Prerequisite: a DSH Desktop profile (the web profile lives at `~/.dsh/profiles/w
 ### Option A — GitHub Release package (recommended)
 
 ```bash
-# 1. download the packaged plugin tgz from the v0.1.9 release
-gh release download v0.1.9 -R zeng6125-rgb/dsh-llm-retry-settings
+# 1. download the packaged plugin tgz from the v0.1.10 release
+gh release download v0.1.10 -R zeng6125-rgb/dsh-llm-retry-settings
 
 # 2. unpack it into the profile's node_modules
 mkdir -p ~/.dsh/profiles/web/node_modules
-tar -xzf dsh-llm-retry-settings-0.1.9.tgz -C ~/.dsh/profiles/web/node_modules/
+tar -xzf dsh-llm-retry-settings-0.1.10.tgz -C ~/.dsh/profiles/web/node_modules/
 mv ~/.dsh/profiles/web/node_modules/package \
    ~/.dsh/profiles/web/node_modules/dsh-llm-retry-settings
 
@@ -49,7 +52,7 @@ The `dsh plugin` command forwards its arguments to `pnpm` in the profile directo
 dsh plugin --profile web add github:zeng6125-rgb/dsh-llm-retry-settings
 
 # or from the release tarball URL
-dsh plugin --profile web add https://github.com/zeng6125-rgb/dsh-llm-retry-settings/releases/download/v0.1.9/dsh-llm-retry-settings-0.1.9.tgz
+dsh plugin --profile web add https://github.com/zeng6125-rgb/dsh-llm-retry-settings/releases/download/v0.1.10/dsh-llm-retry-settings-0.1.10.tgz
 ```
 
 Then enable the plugin in the profile: add `"dsh-llm-retry-settings"` to `dsh.profile.bundles` (or use the Desktop plugin-inventory UI) and restart DSH.
@@ -112,6 +115,9 @@ Read the last lines:
 | `autoContinue` | boolean | `false` | When a turn ends truncated by the output-token ceiling, queue one follow-up "continue" turn automatically. |
 | `maxContinuations` | integer (≥ 0) | `2` | Cap on consecutive auto-continuations per truncation (`0` = never continue). |
 | `continuationPrompt` | string | `""` | The line sent to the model after a truncation; empty (or whitespace-only) falls back to the built-in wording. |
+| `continueOnError` | boolean | `false` | Also continue once when a turn ends in a transient error after the retries are exhausted (timeout / transport / server / stream break / empty response). Deterministic failures are never continued. |
+| `overrides` | array | `[]` | Per provider/model policy. Each row: `{ provider, model, maxRetries, initialDelayMs, maxDelayMs, jitterRatio }`; `*` or empty matches anything, and a numeric `-1` inherits the global value. First matching row wins. |
+| `logPath` | string | (host-injected) | **Read-only.** Absolute path of the host log, injected by the host half for the card's "Open log" button. Not persisted. |
 
 ## How it works
 

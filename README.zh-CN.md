@@ -8,6 +8,9 @@ DSH「LLM 自动重试」设置卡片：在 **设置 → General** 里调整自�
 
 - **自带设置 UI**（客户端 bundle `lib/client.js`）：一张位于 **设置 → General** 的卡片，无需另外装 UI 包。
 - 覆盖 `agent/request-error` 重试策略中的 `maxRetries`、`initialDelayMs`、`maxDelayMs`、`jitterRatio`。
+- **0.1.10 新增** 卡片底部**重试观测面板**（只读）：请求失败重试、自动续写、触顶、让位用户的计数，按错误码与 provider/model 拆分，并列出当前会话模型（覆盖规则照抄即可），可展开日志尾部。
+- **0.1.10 新增** **按 provider / model 的策略**：按顺序取第一条命中的规则，支持 `*` 通配，数值留空即继承全局值。
+- **0.1.10 新增** **退避曲线 + 等待预算**、「重试彻底失败后也续写」开关（仅瞬时错误）、提示词模板，以及跟随内核语言的中英文界面。
 - **0.1.9 新增** 可以直接在卡片上**输入自定义错误码**（`自定义` 分组）：provider 抛出的码不在已知清单里时，输入（如 `MY_PROVIDER_BUSY`）后点**添加**即可。输入会自动转大写并校验（仅限 `A-Z 0-9 _ - .`），重复或非法输入给出内联提示，码原样进入 `retryableCodes`。
 - **0.1.9 新增** **续写提示词可自定义**（`continuationPrompt`）：留空使用内置文案，也可以自己写一句，适配不同中转/模型对措辞的偏好。
 - **0.1.8 修复** 自动续写现在真的会发出去了。宿主半边两道时机坑：`session/event` 是在 `Session.append` **内部**同步派发的，在监听器里直接排续写会撞 `session append cannot reenter while another append is being published`；绕开之后又发现此刻唤醒 agent 会被驱动静默丢弃（`wakeDriver` 只在 maintenance/abort 下才 latch），消息就永远卡在队列里。现在改成先 `await agent.whenIdle()` 再投递，投递前复核（已开新回合 / 你重新发言 / 会话已 dispose 则放弃）。
@@ -26,12 +29,12 @@ DSH「LLM 自动重试」设置卡片：在 **设置 → General** 里调整自�
 ### 方式 A —— GitHub Release 安装包（推荐）
 
 ```bash
-# 1. 从 v0.1.9 release 下载打包好的插件 tgz
-gh release download v0.1.9 -R zeng6125-rgb/dsh-llm-retry-settings
+# 1. 从 v0.1.10 release 下载打包好的插件 tgz
+gh release download v0.1.10 -R zeng6125-rgb/dsh-llm-retry-settings
 
 # 2. 解压进 profile 的 node_modules
 mkdir -p ~/.dsh/profiles/web/node_modules
-tar -xzf dsh-llm-retry-settings-0.1.9.tgz -C ~/.dsh/profiles/web/node_modules/
+tar -xzf dsh-llm-retry-settings-0.1.10.tgz -C ~/.dsh/profiles/web/node_modules/
 mv ~/.dsh/profiles/web/node_modules/package \
    ~/.dsh/profiles/web/node_modules/dsh-llm-retry-settings
 
@@ -48,7 +51,7 @@ mv ~/.dsh/profiles/web/node_modules/package \
 dsh plugin --profile web add github:zeng6125-rgb/dsh-llm-retry-settings
 
 # 或从 release tarball 地址安装
-dsh plugin --profile web add https://github.com/zeng6125-rgb/dsh-llm-retry-settings/releases/download/v0.1.9/dsh-llm-retry-settings-0.1.9.tgz
+dsh plugin --profile web add https://github.com/zeng6125-rgb/dsh-llm-retry-settings/releases/download/v0.1.10/dsh-llm-retry-settings-0.1.10.tgz
 ```
 
 装完还需要在 profile 里启用：把 `"dsh-llm-retry-settings"` 加进 `dsh.profile.bundles`（或使用 Desktop 的插件管理 UI），然后重启 DSH。
@@ -110,6 +113,9 @@ dsh plugin --profile web link "$PWD"
 | `autoContinue` | boolean | `false` | 回合因输出 token 上限被截断时，自动补一轮「继续」。 |
 | `maxContinuations` | integer（≥ 0） | `2` | 同一次截断后连续续写的上限（`0` = 永不续写）。 |
 | `continuationPrompt` | string | `""` | 截断后自动发给模型的那句话；留空（或只有空白）使用内置文案。 |
+| `continueOnError` | boolean | `false` | 重试次数用尽后，若结束原因是瞬时错误（超时 / 传输 / 服务端 / 流中断 / 空响应），也补一轮续写；确定性错误不补。 |
+| `overrides` | array | `[]` | 按 provider / model 的策略。每行 `{ provider, model, maxRetries, initialDelayMs, maxDelayMs, jitterRatio }`；`*` 或留空 = 任意，数值 `-1` = 继承全局值。按顺序取第一条命中。 |
+| `logPath` | string | （宿主注入） | **只读。** 宿主日志绝对路径，由宿主半边注入给卡片的「打开日志」按钮，不写回设置文件。 |
 
 ## 工作原理
 
