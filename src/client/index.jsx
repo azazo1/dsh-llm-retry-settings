@@ -21,6 +21,16 @@ const NS = 'dsh-llm-retry'
 const PLUGIN_ID = 'dsh-llm-retry-settings'
 const CSS_TAG = PLUGIN_ID + '/client.css'
 
+/**
+ * 设置通道的双键（2026-09-22，DSH 0.1.7-alpha.1 适配）——只用于设置，不动 locale/CSS：
+ *   0.1.6 = 宿主 settings.register(NS) 注册的插件 NS；
+ *   0.1.7 = profile entry id（cordis.patch.yml 的 `id: llm-retry-settings`）——
+ *           SettingsForms.describe() 回的 ns 就是 `entry.options.id`，且
+ *           update()/mutate() 也按 entry id 找条目，用 NS 写会抛 No configurable plugin entry。
+ */
+const ENTRY_ID = 'llm-retry-settings'
+const NS_KEYS = [NS, ENTRY_ID]
+
 import { useState, useCallback, useEffect, useSyncExternalStore, memo } from 'react'
 
 // [rc.8 compat] dsh-client-web-react 移除了静态模块导出；
@@ -353,7 +363,7 @@ const useL = () => {
 }
 
 const CSS = [
-  '.dlr-card{border-bottom:1px solid var(--dsw-alias-border-l2);padding:18px 0 20px;display:flex;flex-direction:column;gap:16px}',
+  '.dlr-card{border-bottom:1px solid var(--dsw-alias-border-l2);padding:18px 0 20px;display:flex;flex-direction:column;gap:16px;contain:layout paint}',
   '.dlr-head{display:flex;align-items:flex-start;gap:12px}',
   '.dlr-headText{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}',
   '.dlr-titleRow{display:flex;align-items:center;gap:8px}',
@@ -434,7 +444,7 @@ const CSS = [
   '.dlr-fail{color:var(--dsw-alias-state-danger,#d54545);font-size:13px}',
   '.dlr-dirtyHint{color:var(--dsw-alias-state-business-primary);font-size:12px}',
   '.dlr-vizBox{display:flex;flex-direction:column;gap:6px;margin-top:6px}',
-  '.dlr-curve{display:block;width:100%;height:auto;max-height:120px}',
+  '.dlr-curve{display:block;width:100%;height:auto}',
   '.dlr-curveArea{fill:rgba(75,123,236,.14);stroke:none}',
   '.dlr-curveLine{fill:none;stroke:#3867d6;stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round}',
   '.dlr-curveDot{fill:#3867d6}',
@@ -457,7 +467,7 @@ const CSS = [
   '.dlr-statsList{display:flex;flex-direction:column;gap:2px}',
   '.dlr-statRow,.dlr-recentRow{display:flex;align-items:baseline;gap:8px;font-size:12px;font-variant-numeric:tabular-nums}',
   '.dlr-statKey{color:var(--dsw-alias-label-secondary,#8a8a8a)}',
-  '.dlr-logTail{max-height:220px;overflow:auto;margin:0;padding:8px;border-radius:6px;background:var(--dsw-alias-fill-secondary,rgba(0,0,0,.04));font-family:ui-monospace,Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all}',
+  '.dlr-logTail{max-height:220px;overflow:auto;overscroll-behavior:contain;contain:content;margin:0;padding:8px;border-radius:6px;background:var(--dsw-alias-fill-secondary,rgba(0,0,0,.04));font-family:ui-monospace,Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all}',
 ].join('')
 
 function ensureCss() {
@@ -792,8 +802,10 @@ function BackoffViz({ maxRetries, initialDelayMs, maxDelayMs, jitterRatio }) {
   // 曲线含原点（第 0 次 = 不等待），形状才是「指数爬升到封顶」而不是一串柱子
   const series = [0, ...steps]
   const maxV = Math.max(capMs, ...steps, 1)
-  const W = 320
-  const H = 96
+  // 宽高比贴合卡片实际宽度（~600px）：320:96 配合 max-height 会被 letterbox 成
+  // 居中一小条、两侧各留 ~100px 空白；640:112 整行铺开，无侧边留白。
+  const W = 640
+  const H = 112
   const padL = 34
   const padR = 10
   const padT = 10
@@ -1327,12 +1339,126 @@ function RetrySettingsRow({ useScope, scope, hostHome }) {
   )
 }
 
+
+// ── 双版本设置作用域适配器（2026-09-22 起）─────────────────────────────────────
+// 0.1.6 及以前：ctx.settingsScope.bind({ namespace }) 提供同步快照 + 订阅 + set/mutate。
+// 0.1.7 起：settingsScope 服务被整体移除（内核改为 @deepseek-ai/dsh-settings，服务名 settings），
+//           客户端只能经 ctx.remote.settings 走 RPC：describe() / update() / mutate()。
+// 本适配器用 remote 路径复刻老 scope 的对外形状（getSnapshot/subscribe/set/mutate）；
+// ops 形状（{op:'set',path,value}）两版一致，故组件层与调用点均无需改动。
+function makeRemoteSettingsScope(ctx, namespace) {
+  let remote
+  try {
+    remote = ctx && ctx.remote ? ctx.remote.settings : undefined
+  } catch (error) {
+    remote = undefined
+  }
+  if (!remote || typeof remote.describe !== 'function') return undefined
+  let snap = { value: {} }
+  let revision
+  /** 实际生效的命名空间键：describe() 命中哪一行就用哪一行的 ns（0.1.7 = entry id）。 */
+  let target = namespace
+  const subs = new Set()
+  const emit = () => {
+    for (const fn of Array.from(subs)) {
+      try {
+        fn()
+      } catch (error) {
+        /* 单个订阅者异常不影响其他订阅者 */
+      }
+    }
+  }
+  const absorb = (view, hostWritable) => {
+    if (!view || typeof view !== 'object') return
+    snap = { value: view.value || {}, revision: view.revision, schema: view.schema, status: 'ready', writable: hostWritable !== false && view.writable !== false, base: view.base, user: view.user }
+    revision = view.revision
+    emit()
+  }
+  // 0.1.7 remote RPC 统一返回 {ok:true,value}|{ok:false,error} 信封（dsh-client-connection parseConnectionResponse）
+  const unwrap = (resp) => (resp && typeof resp === 'object' && 'ok' in resp ? (resp.ok ? resp.value : undefined) : resp)
+  const absorbResp = (resp) => {
+    const view = unwrap(resp)
+    if (view) absorb(view)
+  }
+  const refresh = () =>
+    Promise.resolve()
+      .then(() => remote.describe())
+      .then((all) => {
+        const payload = unwrap(all)
+        const list = payload && payload.namespaces
+        if (!Array.isArray(list)) return
+        // 双键匹配：0.1.6 命中 NS，0.1.7 命中 entry id。
+        const row = list.find((r) => r && (r.ns === namespace || NS_KEYS.indexOf(r.ns) >= 0))
+        if (row) target = row.ns
+        absorb(row, payload && payload.writable)
+      })
+      .catch(() => {
+        // 首次失败多半是连接/装载竞态：1.5s 后单次重试，失败不再重试（不轮询）
+        if (!retried) {
+          retried = true
+          scheduleRefresh(1500)
+        }
+      })
+      .then((all) => {
+        // describe 成功但没找到本插件的行（装载竞态）：同样给一次单发重试
+        if (!retried && snap.status !== 'ready') {
+          retried = true
+          scheduleRefresh(1500)
+        }
+      })
+  void refresh()
+  let primed = false
+  let retried = false
+  let pending = null
+  const scheduleRefresh = (delay) => {
+    if (pending) clearTimeout(pending)
+    pending = setTimeout(() => {
+      pending = null
+      void refresh()
+    }, delay)
+  }
+  try {
+    if (ctx && ctx.remote && typeof ctx.remote.$on === 'function') {
+      ctx.remote.$on('settings/document-updated', (ns) => {
+        if (NS_KEYS.indexOf(ns) >= 0) scheduleRefresh(200)
+      })
+    }
+  } catch (error) {
+    /* 事件通道不可用：退回手动刷新 */
+  }
+  return {
+    getSnapshot: () => snap,
+    subscribe: (fn) => {
+      subs.add(fn)
+      if (!primed) {
+        primed = true
+        void refresh()
+      }
+      return () => {
+        subs.delete(fn)
+      }
+    },
+    set: (key, value) =>
+      Promise.resolve()
+        .then(() => remote.update(target, { [key]: value }, revision))
+        .then(absorbResp)
+        .then(() => undefined),
+    mutate: (ops) =>
+      Promise.resolve()
+        .then(() => remote.mutate(target, ops, revision))
+        .then(absorbResp)
+        .then(() => undefined),
+    refresh,
+  }
+}
+
 export function apply(ctx) {
   ensureCss()
   // 语言：优先跟内核 locale 设置的 language 字段（有订阅就跟随切换），
   // 拿不到就退到 <html lang> / navigator.language（见 detectLang）。
+  ctx.inject(['settingsScope'], (sctx) => {
   try {
-    const localeScope = ctx.settingsScope.bind({ namespace: 'locale' })
+    const localeScope = sctx.settingsScope.bind({ namespace: 'locale' })
     const readLang = () => {
       try {
         const localeSnap = localeScope.getSnapshot()
@@ -1355,8 +1481,7 @@ export function apply(ctx) {
   } catch (error) {
     /* locale 命名空间不存在：靠 html/浏览器语言 */
   }
-  const scope = ctx.settingsScope.bind({ namespace: NS })
-  const useScope = bindSnapshotSelector(scope)
+  })
   // ctx.remote.$host.home = 宿主 OS 用户目录（dsh-api-remotes 传的 homedir()），
   // 用于在宿主半边还没重载时也能拼出 ~/.dsh/logs/... 的绝对路径。
   const hostHome = () => {
@@ -1367,13 +1492,36 @@ export function apply(ctx) {
       return ''
     }
   }
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
-    name: 'settings.section',
-    id: 'llm-retry-settings',
-    order: 15,
-    label: () => L.title,
-    inject: () => ({ useScope, scope, hostHome })
-  }, RetrySettingsRow), PLUGIN_ID + ': settings section')
+
+  let registered = false
+  const registerSection = (scope) => {
+    if (!scope || registered) return
+    registered = true
+    const useScope = bindSnapshotSelector(scope)
+    ctx.slots.inject('settings.section', () => ctx.slots.register({
+      name: 'settings.section',
+      id: 'llm-retry-settings',
+      order: 15,
+      label: () => L.title,
+      inject: () => ({ useScope, scope, hostHome })
+    }, RetrySettingsRow), PLUGIN_ID + ': settings section')
+  }
+  // 0.1.6 路径：settingsScope（软注入 ⇒ 服务不存在也不会让 entry 卡 pending）
+  ctx.inject(['settingsScope'], (sctx) => {
+    try {
+      registerSection(sctx.settingsScope.bind({ namespace: NS }))
+    } catch (error) {
+      /* 落到新路径 */
+    }
+  })
+  // 0.1.7 路径：ctx.remote.settings
+  ctx.inject(['remote.settings'], (sctx) => {
+    try {
+      registerSection(makeRemoteSettingsScope(sctx, NS))
+    } catch (error) {
+      /* 无设置服务：不注册分区，其余功能不受影响 */
+    }
+  })
 }
 
-export const inject = ['slots', 'settingsScope', 'remote']
+export const inject = ['slots', 'remote']

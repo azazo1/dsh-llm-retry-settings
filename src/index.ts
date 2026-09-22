@@ -24,15 +24,59 @@
 
 import { randomUUID } from 'node:crypto'
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import z from '@deepseek-ai/schemastery'
+import zBundled from '@deepseek-ai/schemastery'
 
 export const name = 'dsh-llm-retry-settings'
 
+/**
+ * 内核自适应 schemastery（2026-09-22，DSH 0.1.7-alpha.1 双版本适配）。
+ *
+ * 为什么不能只用 esbuild 打进 lib/index.js 的那份：`.volatile()`（0.1.7 设置表单唯一认的
+ * 字段标记，dsh-settings `describe() → volatileForm()`）是 schemastery **3.18.3** 才有的；
+ * 0.1.6-alpha.2 装机树里是 3.18.2。打包副本在构建时就固定了，内核升级不会让它变新。
+ *
+ * 所以优先取「运行时内核目录里的那一份」：
+ *   0.1.6 → 3.18.2（无 volatile ⇒ vol() 退化为 no-op，行为与旧版逐字一致）
+ *   0.1.7 → 3.18.3（有 volatile ⇒ 设置表单与 live 引用生效）
+ * 取不到（本插件是发布到 GitHub 的独立包，用户环境没有 DSH 树时）退回打包副本。
+ */
+const z: typeof zBundled = (() => {
+  try {
+    const req = createRequire(import.meta.url)
+    const live: any = req('@deepseek-ai/schemastery')
+    const cand = live?.default ?? live
+    if (cand && typeof cand.object === 'function' && typeof cand.string === 'function') return cand
+  } catch {
+    /* 运行时没有内核那份 schemastery：用打包副本 */
+  }
+  return zBundled
+})()
+
+/**
+ * 0.1.6 的 schemastery 3.18.2 没有 `.volatile()`，硬调会 TypeError ⇒ 守卫成 no-op。
+ *
+ * ⚠ 必须是 no-op，不能退化成「写 meta.volatile」：0.1.7 的 loader 会因此把该字段判为
+ * volatile-only 更新，而 3.18.2 的 resolve 不产生引用对象 ⇒ `_commitVolatile()` 走
+ * `refs.length === 0 → return true`，用户的写入被静默吞掉（表单变好看但改不动）。
+ */
+const vol = <T>(f: T): T => (typeof (f as any).volatile === 'function' ? (f as any).volatile() : f)
+
+/**
+ * 0.1.7 的 volatile 字段解析结果是 cosmokit 的引用对象（`Symbol.for('cosmokit.volatile.write')`
+ * 协议，可跨 ESM/CJS 副本识别），取值要 `.get()`；0.1.6 是裸值 ⇒ 本函数是恒等变换。
+ */
+const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write')
+const unvol = <T>(v: T): T =>
+  v && typeof v === 'object' && VOLATILE_WRITE in (v as any) && typeof (v as any).get === 'function'
+    ? ((v as any).get() as T)
+    : v
+
 /** 诊断构建标记：写进 host.log，用来确认运行中的到底是哪一版 lib/index.js。 */
-const DIAG_TAG = 'v0.1.10-dev'
+const DIAG_TAG = 'v0.1.11'
 
 /**
  * 文件诊断日志：`~/.dsh/logs/dsh-llm-retry-settings/host.log`。
@@ -188,7 +232,11 @@ const TRANSIENT_CONTINUE_CODES = new Set([
 // agents：取 session 对应的 Agent 实例下 followup；sessions：接收 session/event 流。
 export const inject = ['settings', 'agents', 'sessions']
 
+/** 0.1.6 的设置命名空间；0.1.7 起命名空间 = **profile entry id**（见 ENTRY_ID）。 */
 const NS = 'dsh-llm-retry'
+
+/** 0.1.7（SettingsForms）下的设置命名空间键 = profile entry id（cordis.patch.yml 的 `id:`）。 */
+const ENTRY_ID = 'llm-retry-settings'
 
 /** 默认续写指令：用户可在设置页以 continuationPrompt 覆盖。 */
 const DEFAULT_CONTINUATION_PROMPT =
@@ -282,8 +330,8 @@ export const DEFAULTS = {
   continueOnError: false,
   /** provider/model 级策略覆盖；空数组 = 全部沿用全局值。 */
   overrides: [] as PolicyOverride[],
-  /** 只读：宿主日志绝对路径，由 base 层注入，不是用户可配项。 */
-  logPath: '',
+  /** 只读：宿主日志绝对路径。0.1.7 configure 分支不再有 base 注入 → 默认值直接给真实路径（卡片 hostStale 判据 = 它非空）。 */
+  logPath: LOG_FILE,
 } as const
 
 export interface Config {
@@ -308,30 +356,42 @@ export interface Config {
   logPath: string
 }
 
+/**
+ * Config：0.1.7 的设置表单只渲染 `.volatile()` 过的字段（`volatileForm()` 过滤，
+ * 一个 volatile 字段都没有 ⇒ describe() 里本 entry 0 行 ⇒ 设置分区空白）。
+ *
+ * volatile 的粒度注意：schemastery 校验「volatile 字段须是固定对象路径、不能嵌套在另一个
+ * volatile 字段内」，且 `volatileForm` 只下钻 z.object（数组节点不下钻）——所以：
+ *   - 顶层标量逐个 vol()；
+ *   - overrides 整块作为**一个** volatile 字段（不逐项 vol，避免嵌套叠加）。
+ * 0.1.6 走 vol() 的 no-op 分支，schema 与旧版完全一致。
+ */
 export const Config = z.object({
-  enabled: z.boolean().default(DEFAULTS.enabled),
-  maxRetries: z.number().step(1).min(0).default(DEFAULTS.maxRetries),
-  initialDelayMs: z.number().min(1).default(DEFAULTS.initialDelayMs),
-  maxDelayMs: z.number().min(1).default(DEFAULTS.maxDelayMs),
-  jitterRatio: z.number().min(0).max(1).default(DEFAULTS.jitterRatio),
-  retryableCodes: z.array(z.string()).default([...DEFAULT_RETRYABLE_CODES]),
-  autoContinue: z.boolean().default(DEFAULTS.autoContinue),
-  maxContinuations: z.number().step(1).min(0).default(DEFAULTS.maxContinuations),
-  continuationPrompt: z.string().default(DEFAULTS.continuationPrompt),
-  continueOnError: z.boolean().default(DEFAULTS.continueOnError),
-  overrides: z
-    .array(
-      z.object({
-        provider: z.string().default('*'),
-        model: z.string().default('*'),
-        maxRetries: z.number().step(1).min(OVERRIDE_INHERIT).default(OVERRIDE_INHERIT),
-        initialDelayMs: z.number().step(1).min(OVERRIDE_INHERIT).default(OVERRIDE_INHERIT),
-        maxDelayMs: z.number().step(1).min(OVERRIDE_INHERIT).default(OVERRIDE_INHERIT),
-        jitterRatio: z.number().min(OVERRIDE_INHERIT).max(1).default(OVERRIDE_INHERIT),
-      }),
-    )
-    .default([]),
-  logPath: z.string().default(DEFAULTS.logPath),
+  enabled: vol(z.boolean().default(DEFAULTS.enabled)),
+  maxRetries: vol(z.number().step(1).min(0).default(DEFAULTS.maxRetries)),
+  initialDelayMs: vol(z.number().min(1).default(DEFAULTS.initialDelayMs)),
+  maxDelayMs: vol(z.number().min(1).default(DEFAULTS.maxDelayMs)),
+  jitterRatio: vol(z.number().min(0).max(1).default(DEFAULTS.jitterRatio)),
+  retryableCodes: vol(z.array(z.string()).default([...DEFAULT_RETRYABLE_CODES])),
+  autoContinue: vol(z.boolean().default(DEFAULTS.autoContinue)),
+  maxContinuations: vol(z.number().step(1).min(0).default(DEFAULTS.maxContinuations)),
+  continuationPrompt: vol(z.string().default(DEFAULTS.continuationPrompt)),
+  continueOnError: vol(z.boolean().default(DEFAULTS.continueOnError)),
+  overrides: vol(
+    z
+      .array(
+        z.object({
+          provider: z.string().default('*'),
+          model: z.string().default('*'),
+          maxRetries: z.number().step(1).min(OVERRIDE_INHERIT).default(OVERRIDE_INHERIT),
+          initialDelayMs: z.number().step(1).min(OVERRIDE_INHERIT).default(OVERRIDE_INHERIT),
+          maxDelayMs: z.number().step(1).min(OVERRIDE_INHERIT).default(OVERRIDE_INHERIT),
+          jitterRatio: z.number().min(OVERRIDE_INHERIT).max(1).default(OVERRIDE_INHERIT),
+        }),
+      )
+      .default([]),
+  ),
+  logPath: vol(z.string().default(DEFAULTS.logPath)),
 })
 
 // —— 归一化：schema 之外的第二道防线（settings base 传入的是未校验裸值）——
@@ -339,12 +399,20 @@ export const Config = z.object({
 const normCodes = (v: unknown): string[] =>
   Array.isArray(v) ? v.filter((c): c is string => typeof c === 'string' && c.length > 0) : []
 
-/** 字段收敛器：类型不符返回 undefined，由调用方决定回退到现值还是默认值。 */
-const asBool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined)
-const asInt = (v: unknown, min: number): number | undefined =>
-  typeof v === 'number' && Number.isFinite(v) ? Math.max(min, Math.floor(v)) : undefined
-const asFloat = (v: unknown, min: number, max: number): number | undefined =>
-  typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : undefined
+/** 字段收敛器：类型不符返回 undefined，由调用方决定回退到现值还是默认值。
+ *  0.1.7 的 volatile 字段是引用对象，先 unvol 解引用（0.1.6 是恒等变换）。 */
+const asBool = (v: unknown): boolean | undefined => {
+  const x = unvol(v)
+  return typeof x === 'boolean' ? x : undefined
+}
+const asInt = (v: unknown, min: number): number | undefined => {
+  const x = unvol(v)
+  return typeof x === 'number' && Number.isFinite(x) ? Math.max(min, Math.floor(x)) : undefined
+}
+const asFloat = (v: unknown, min: number, max: number): number | undefined => {
+  const x = unvol(v)
+  return typeof x === 'number' && Number.isFinite(x) ? Math.min(max, Math.max(min, x)) : undefined
+}
 
 /** DEFAULTS 的 Config 视图：DEFAULTS 是 as const，数组需先解掉 readonly 才能当回退值。 */
 const DEFAULTS_CONFIG: Config = { ...DEFAULTS, retryableCodes: [...DEFAULTS.retryableCodes] }
@@ -357,19 +425,24 @@ const DEFAULTS_CONFIG: Config = { ...DEFAULTS, retryableCodes: [...DEFAULTS.retr
  * 越界夹紧、类型不符回退、非法码过滤、退避下限封顶都在此统一完成。
  */
 function coerceConfig(raw: Partial<Config> | undefined | null, fallback: Config): Config {
+  // 非 asBool/asInt/asFloat 覆盖的字段同样要先解引用（0.1.7 volatile 引用对象）。
+  const codes = unvol(raw?.retryableCodes)
+  const prompt = unvol(raw?.continuationPrompt)
+  const overridesRaw = unvol(raw?.overrides)
+  const logPath = unvol(raw?.logPath)
   const cfg: Config = {
     enabled: asBool(raw?.enabled) ?? fallback.enabled,
     maxRetries: asInt(raw?.maxRetries, 0) ?? fallback.maxRetries,
     initialDelayMs: asInt(raw?.initialDelayMs, 1) ?? fallback.initialDelayMs,
     maxDelayMs: asInt(raw?.maxDelayMs, 1) ?? fallback.maxDelayMs,
     jitterRatio: asFloat(raw?.jitterRatio, 0, 1) ?? fallback.jitterRatio,
-    retryableCodes: Array.isArray(raw?.retryableCodes) ? normCodes(raw.retryableCodes) : [...fallback.retryableCodes],
+    retryableCodes: Array.isArray(codes) ? normCodes(codes) : [...fallback.retryableCodes],
     autoContinue: asBool(raw?.autoContinue) ?? fallback.autoContinue,
     maxContinuations: asInt(raw?.maxContinuations, 0) ?? fallback.maxContinuations,
-    continuationPrompt: typeof raw?.continuationPrompt === 'string' ? raw.continuationPrompt : fallback.continuationPrompt,
+    continuationPrompt: typeof prompt === 'string' ? prompt : fallback.continuationPrompt,
     continueOnError: asBool(raw?.continueOnError) ?? fallback.continueOnError,
-    overrides: normOverrides(raw?.overrides, fallback.overrides),
-    logPath: typeof raw?.logPath === 'string' && raw.logPath !== '' ? raw.logPath : fallback.logPath,
+    overrides: normOverrides(overridesRaw, fallback.overrides),
+    logPath: typeof logPath === 'string' && logPath !== '' ? logPath : fallback.logPath,
   }
   if (cfg.initialDelayMs > cfg.maxDelayMs) cfg.initialDelayMs = cfg.maxDelayMs
   return cfg
@@ -517,10 +590,42 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
 
   // 与 dsh-thinking-compact 同款：ctx.inject(['settings']) + settings.register 直连，
   // 服务可用后注册命名空间并开始 live 同步（scope.watch 即时回调）。
+  // 0.1.7 起 register/installSection 都不存在（设置服务 = SettingsForms），改 configure()。
   ctx.inject(['settings'], (sctx: any) => {
     try {
-      if (!sctx?.settings || typeof sctx.settings.register !== 'function') {
-        diag('settings 服务缺少 register，跳过命名空间注册')
+      const settings = sctx?.settings
+      if (!settings) {
+        diag('settings 服务不可用，跳过命名空间注册')
+        return
+      }
+      if (typeof settings.configure === 'function' && typeof settings.register !== 'function') {
+        // 0.1.7（SettingsForms）：命名空间 = profile entry id（ENTRY_ID），表单字段来自
+        // Config 里 .volatile() 过的字段。auto:false ⇒ 不自动生成本 entry 的表单页，
+        // 交给插件自己的 settings.section 卡片。同一 fiber 重复 configure 会抛，忽略即可。
+        try {
+          sctx.effect(() => settings.configure({ auto: false }, ctx.fiber))
+        } catch (error) {
+          diag(`settings.configure 失败（可能已配置过同一 fiber）：${String(error)}`)
+        }
+        // 0.1.7 的 volatile 写入不重挂插件，只原地更新引用 ⇒ 传给 apply 的 config 对象
+        // 引用不变、字段值变。靠 loader/volatile-update 事件作废 lastRaw 缓存并重读。
+        scopeRef = { get: () => config as Partial<Config> }
+        lastRaw = null
+        syncFromScope(config as Partial<Config>)
+        try {
+          sctx.on('loader/volatile-update', () => {
+            lastRaw = null
+            syncFromScope(config as Partial<Config>)
+            diag(`settings sync(volatile): autoContinue=${live.autoContinue} maxContinuations=${live.maxContinuations} enabled=${live.enabled}`)
+          })
+        } catch (error) {
+          diag(`loader/volatile-update 监听失败（设置改动需重挂才生效）：${String(error)}`)
+        }
+        diag(`settings presentation configured (0.1.7 SettingsForms, ns=${ENTRY_ID}) ${summaryOf(live)}`)
+        return
+      }
+      if (typeof settings.register !== 'function') {
+        diag('settings 服务缺少 register/configure，跳过命名空间注册')
         return
       }
       const scope = sctx.settings.register(NS, Config, { base: { ...(config || {}), logPath: LOG_FILE } })
