@@ -76,7 +76,7 @@ const unvol = <T>(v: T): T =>
     : v
 
 /** 诊断构建标记：写进 host.log，用来确认运行中的到底是哪一版 lib/index.js。 */
-const DIAG_TAG = 'v0.1.11'
+const DIAG_TAG = 'v0.1.12'
 
 /**
  * 文件诊断日志：`~/.dsh/logs/dsh-llm-retry-settings/host.log`。
@@ -515,7 +515,10 @@ function makeContinuationMessage(text: string): unknown {
     id: randomUUID(),
     role: 'user',
     content: Object.freeze([Object.freeze({ type: 'text', text })]),
-    source: Object.freeze({ kind: 'plugin', plugin: NS }),
+    // 2026-09-23 第 65 轮：V4 写入校验拒绝 kind:'plugin'（V3 旧语法）——
+  // 第三方生产者必须写 'plugin:<NS>'，否则续写投递时 SessionFormatError:
+  // format v4 message requires a producer-owned source kind（用户可见为「本轮运行失败」）。
+  source: Object.freeze({ kind: 'plugin:' + NS }),
   })
 }
 
@@ -904,7 +907,9 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
               state.capped = false
               return
             }
-            if (kind === 'plugin' && source.plugin === NS) {
+            // 识别自己的续写消息：v4 形态 kind='plugin:'+NS（历史会话迁移后也是它），
+            // v3 旧形态 kind='plugin'+plugin 字段保留兼容（老内核/未迁移文件）。
+            if ((kind === 'plugin' && source.plugin === NS) || kind === 'plugin:' + NS) {
               diag(`续写消息已入会话 session=${session.id}`)
             }
             return
