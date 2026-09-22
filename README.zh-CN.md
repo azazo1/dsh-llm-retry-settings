@@ -8,6 +8,8 @@ DSH「LLM 自动重试」设置卡片：在 **设置 → General** 里调整自�
 
 - **自带设置 UI**（客户端 bundle `lib/client.js`）：一张位于 **设置 → General** 的卡片，无需另外装 UI 包。
 - 覆盖 `agent/request-error` 重试策略中的 `maxRetries`、`initialDelayMs`、`maxDelayMs`、`jitterRatio`。
+- **0.1.11 新增** 支持新内核 **0.1.7-alpha.1**（设置 API 迁移到 `SettingsForms`：volatile 表单字段、`loader/volatile-update` 实时同步、卡片经 `remote.settings` 读写）。
+- **0.1.11 新增** 改善设置卡片滑动流畅度，修复 bug。
 - **0.1.10 新增** 卡片底部**重试观测面板**（只读）：请求失败重试、自动续写、触顶、让位用户的计数，按错误码与 provider/model 拆分，并列出当前会话模型（覆盖规则照抄即可），可展开日志尾部。
 - **0.1.10 新增** **按 provider / model 的策略**：按顺序取第一条命中的规则，支持 `*` 通配，数值留空即继承全局值。
 - **0.1.10 新增** **退避曲线 + 等待预算**、「重试彻底失败后也续写」开关（仅瞬时错误）、提示词模板，以及跟随内核语言的中英文界面。
@@ -29,12 +31,12 @@ DSH「LLM 自动重试」设置卡片：在 **设置 → General** 里调整自�
 ### 方式 A —— GitHub Release 安装包（推荐）
 
 ```bash
-# 1. 从 v0.1.10 release 下载打包好的插件 tgz
-gh release download v0.1.10 -R zeng6125-rgb/dsh-llm-retry-settings
+# 1. 从 v0.1.11 release 下载打包好的插件 tgz
+gh release download v0.1.11 -R zeng6125-rgb/dsh-llm-retry-settings
 
 # 2. 解压进 profile 的 node_modules
 mkdir -p ~/.dsh/profiles/web/node_modules
-tar -xzf dsh-llm-retry-settings-0.1.10.tgz -C ~/.dsh/profiles/web/node_modules/
+tar -xzf dsh-llm-retry-settings-0.1.11.tgz -C ~/.dsh/profiles/web/node_modules/
 mv ~/.dsh/profiles/web/node_modules/package \
    ~/.dsh/profiles/web/node_modules/dsh-llm-retry-settings
 
@@ -51,7 +53,7 @@ mv ~/.dsh/profiles/web/node_modules/package \
 dsh plugin --profile web add github:zeng6125-rgb/dsh-llm-retry-settings
 
 # 或从 release tarball 地址安装
-dsh plugin --profile web add https://github.com/zeng6125-rgb/dsh-llm-retry-settings/releases/download/v0.1.10/dsh-llm-retry-settings-0.1.10.tgz
+dsh plugin --profile web add https://github.com/zeng6125-rgb/dsh-llm-retry-settings/releases/download/v0.1.11/dsh-llm-retry-settings-0.1.11.tgz
 ```
 
 装完还需要在 profile 里启用：把 `"dsh-llm-retry-settings"` 加进 `dsh.profile.bundles`（或使用 Desktop 的插件管理 UI），然后重启 DSH。
