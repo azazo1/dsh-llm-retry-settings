@@ -13,7 +13,7 @@
  *    每个会话最多连续 maxContinuations 次。默认关闭。
  *    续写指令来自设置页的 `continuationPrompt`：用户可按自己的 provider/model
  *    自定义；为空时使用内置默认文案，并对所有自动续写场景生效。
- *    `agent/status`→idle 是同事件的兜底触发（回看 session.log 取原因），两条路径
+ *    `agent/status`→idle 是同事件的兜底触发（通过 seq/eventAt 回看原因），两条路径
  *    按回合号去重，不会双发。
  * 4. 运行诊断写 ~/.dsh/logs/dsh-llm-retry-settings/host.log（低频事件，见 diag）。
  * 5. 只读观测路由（客户端卡片的观测面板拉取，不轮询不推送）：
@@ -471,13 +471,14 @@ interface ContinueState {
  *
  * 只给 agent/status 兜底路径用：该钩子不带原因，得自己回看日志。最多回看
  * 400 条事件——turn/end 之后紧跟的事件寥寥，再多就说明这个会话不正常，
- * 宁可不续写也不做全量扫描。
+ * 宁可不续写也不做全量扫描。读取走公开的 `seq` / `eventAt()`，不依赖
+ * Session 内部的 `log` 数组。
  */
 function lastTurnEnd(session: any): { turn: number; kind: string; code?: string } | undefined {
-  const log = session?.log
-  if (!Array.isArray(log)) return undefined
+  if (typeof session?.eventAt !== 'function' || typeof session.seq !== 'number') return undefined
+  const end = session.seq
   const read = (index: number): { turn: number; kind: string; code?: string } | undefined => {
-    const event = log[index]
+    const event = session.eventAt(index)
     if (event?.type !== 'turn/end') return undefined
     const reason = event.data?.reason
     const code = reason?.error?.code ?? reason?.error?.failure?.code ?? reason?.failure?.code
@@ -488,12 +489,12 @@ function lastTurnEnd(session: any): { turn: number; kind: string; code?: string 
     }
   }
   // 兜底路径每次 idle 都会调用：turn/end 几乎总在尾部，先扫 24 条，未命中才放宽到 400。
-  const near = Math.max(0, log.length - 24)
-  for (let i = log.length - 1; i >= near; i -= 1) {
+  const near = Math.max(0, end - 24)
+  for (let i = end - 1; i >= near; i -= 1) {
     const hit = read(i)
     if (hit) return hit
   }
-  const far = Math.max(0, log.length - 400)
+  const far = Math.max(0, end - 400)
   for (let i = near - 1; i >= far; i -= 1) {
     const hit = read(i)
     if (hit) return hit
@@ -534,18 +535,17 @@ function makeContinuationMessage(text: string): unknown {
  * 是否回显上一段思考，与本函数无关。故这里只把 text=yes/no 写进 host.log，
  * 供用户自定义续写提示词时判断措辞。
  *
- * 在 session.log 里按 seq 倒序找：从 turn/end 往回到同回合的 turn/start 为止，
- * 检查 assistant/message 的 content。找不到 turn/start 就继续往前扫（最多 800
- * 条）。拿不到 log（非数组）时返回 true——诊断字段宁可信其有。
- * 事件对象来自内存 session.log，不落盘解析，无性能顾虑。
+ * 从 `seq` 倒序通过 `eventAt()` 查找：从 turn/end 往回到同回合的 turn/start
+ * 为止，检查 assistant/message 的 content。找不到 turn/start 就继续往前扫。
+ * 公共读取接口不可用时返回 true——诊断字段宁可信其有。
  */
 function visibleTextBeforeTurnEnd(session: any, turn: number): boolean {
-  const log = session?.log
-  if (!Array.isArray(log)) return true
+  if (typeof session?.eventAt !== 'function' || typeof session.seq !== 'number') return true
+  const end = session.seq
   const hasText = (content: any): boolean =>
     Array.isArray(content) && content.some((part: any) => part?.type === 'text' && typeof part.text === 'string' && part.text.trim() !== '')
-  for (let i = log.length - 1, floor = Math.max(-1, log.length - 120); i > floor; i -= 1) {
-    const event = log[i]
+  for (let i = end - 1, floor = Math.max(-1, end - 120); i > floor; i -= 1) {
+    const event = session.eventAt(i)
     if (!event || typeof event.type !== 'string') continue
     if (event.type === 'turn/start' && event.data?.turn === turn) return false
     if (event.type === 'assistant/message' && hasText(event.data?.message?.content ?? event.data?.content)) return true
@@ -744,7 +744,7 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
   /**
    * 一次 turn/end 的唯一处理入口，两条触发路径共用：
    *  - `session/event`（主路径，带原因）
-   *  - `agent/status` → idle（兜底路径，回看 session.log 找原因）
+   *  - `agent/status` → idle（兜底路径，通过 seq/eventAt 回看原因）
    * 兜底路径的存在理由：本插件是 profile 插件，而 session/event 的派发上下文是
    * sessions 服务自己的 ctx（dsh-session/lib/index.js `emitCtx: this.ctx`）；
    * agent/* 系列钩子则走 agent 的 carrier（`agent/request-error` 已验证可达）。
@@ -847,8 +847,7 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
     // send(wakeup=true) 才会真的开新驱动。
     // 截断点分型只用于诊断（text=yes/no）：截断发生在正文之后还是思考阶段，
     // 直接决定「继续输出」这类措辞能不能成立，是自定义提示词时最该看的一项。
-    // 判定必须发生在投递前、且用当前 session.log（两处都满足：主路径同步收到
-    // turn/end 时该回合全部事件已入 log；兜底路径 idle 时更齐）。
+    // 判定必须发生在投递前，并通过公开的 seq/eventAt 读取当前会话事件。
     const hasVisibleText = visibleTextBeforeTurnEnd(session, turn)
     state.chain += 1
     const expectedChain = state.chain
