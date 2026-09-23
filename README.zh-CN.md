@@ -1,22 +1,29 @@
 # dsh-llm-retry-settings
 
-DSH "LLM 自动重试" 设置页: 在 **设置 -> LLM 自动重试** 调整同一请求重试 (次数 / 退避 / 错误码), 宿主 `@deepseek-ai/dsh-llm-retry` 实时生效. 0.2.0 起 `autoContinue` 还会在输出截断, 崩溃孤儿, 或瞬时失败 (`PI_AI_ERROR` / `Unexpected end of JSON input` 等) 后自动续写. 目标宿主 `0.1.2-rc.1`.
+DSH「LLM 自动重试」设置卡片：在 **设置 → General** 里调整自动重试的次数与退避时间，宿主 `@deepseek-ai/dsh-llm-retry` 实时生效。0.1.7 起还能**在回答被输出 token 上限截断时自动续写**；0.1.9 起额外错误码与续写提示词都能自己写。
 
 [English](./README.md)
 
 ## 功能
 
-- **自带设置 UI** (客户端 bundle `lib/client.js`): 独立分区 **设置 -> LLM 自动重试**, 无需另外装 UI 包.
+- **自带设置 UI**（客户端 bundle `lib/client.js`）：一张位于 **设置 → General** 的卡片，无需另外装 UI 包。
 - 覆盖 `agent/request-error` 重试策略中的 `maxRetries`、`initialDelayMs`、`maxDelayMs`、`jitterRatio`。
-- **0.1.3 新增** `retryableCodes`：可勾选的额外重试错误码，与各 provider 自带列表 **合并（去重）而非替换**。默认补入 `INVALID_REQUEST` + `PI_AI_ERROR`，开箱即重试 OpenAI 式 HTTP 400（thinking 模式 `reasoning_text`）与流式失败兜底码。
+- **0.1.12 修复** 会话格式 v4 下自动续写投递失败：消息 source 必须是 producer-owned 形态，续写消息改携 `source.kind = "plugin:dsh-llm-retry"`（退役的 `{kind:"plugin"}` 包装不再被接受）；host.log 的「续写消息已入会话」识别同步恢复。
+- **0.1.11 新增** 支持新内核 **0.1.7-alpha.1**（设置 API 迁移到 `SettingsForms`：volatile 表单字段、`loader/volatile-update` 实时同步、卡片经 `remote.settings` 读写）。
+- **0.1.11 新增** 改善设置卡片滑动流畅度，修复 bug。
+- **0.1.10 新增** 卡片底部**重试观测面板**（只读）：请求失败重试、自动续写、触顶、让位用户的计数，按错误码与 provider/model 拆分，并列出当前会话模型（覆盖规则照抄即可），可展开日志尾部。
+- **0.1.10 新增** **按 provider / model 的策略**：按顺序取第一条命中的规则，支持 `*` 通配，数值留空即继承全局值。
+- **0.1.10 新增** **退避曲线 + 等待预算**、「重试彻底失败后也续写」开关（仅瞬时错误）、提示词模板，以及跟随内核语言的中英文界面。
+- **0.1.9 新增** 可以直接在卡片上**输入自定义错误码**（`自定义` 分组）：provider 抛出的码不在已知清单里时，输入（如 `MY_PROVIDER_BUSY`）后点**添加**即可。输入会自动转大写并校验（仅限 `A-Z 0-9 _ - .`），重复或非法输入给出内联提示，码原样进入 `retryableCodes`。
+- **0.1.9 新增** **续写提示词可自定义**（`continuationPrompt`）：留空使用内置文案，也可以自己写一句，适配不同中转/模型对措辞的偏好。
 - **0.1.8 修复** 自动续写现在真的会发出去了。宿主半边两道时机坑：`session/event` 是在 `Session.append` **内部**同步派发的，在监听器里直接排续写会撞 `session append cannot reenter while another append is being published`；绕开之后又发现此刻唤醒 agent 会被驱动静默丢弃（`wakeDriver` 只在 maintenance/abort 下才 latch），消息就永远卡在队列里。现在改成先 `await agent.whenIdle()` 再投递，投递前复核（已开新回合 / 你重新发言 / 会话已 dispose 则放弃）。
 - **0.1.8 新增** 宿主半边把每一步决策写进 `~/.dsh/logs/dsh-llm-retry-settings/host.log`（低频、256 KB 封顶），设置卡片上也标了这个路径。见 [排错](#排错)。
 - **0.1.7 新增** 重新按当前宿主核对错误码清单：补入 `PI_AI_NOT_WARMED`（适配器预热竞态，退避后重试通常能成）与三个琥珀色「重试无意义」码（`UNKNOWN_MODEL`、`UNSUPPORTED_OPTION`、`REQUEST_EXTENSION`）。同时澄清 `TIMEOUT`：SSE 卡流（stream idle 看门狗）就是以 `TIMEOUT` 上报，并没有独立错误码，宿主默认重试码表已覆盖。
 - **0.1.7 新增** **输出截断自动续写**（`autoContinue`，默认关闭）。撞到输出 token 上限**不是请求失败**——请求是成功返回的，只是 `finish = max-tokens`——所以任何重试策略都管不到它。开启后本插件监听 `turn/end`，每次截断补一轮续写，最多连续 `maxContinuations` 次（模型正常说完或你重新发言即重新计数）。
 - **0.1.7 新增** 错误码 chip 按「重试有没有恢复价值」分六组：瞬时故障 → 限流与配额 → 请求与参数 → 内容与能力 → 凭证与鉴权 → 取消与兜底，组标题上标出该组已选数量；已选中的码仍在**自己那一组内**靠前。
 - **0.1.5 新增** 已选中的错误码自动靠前，未选中的排在其后；组内顺序固定，勾选时 chip 不会乱跳。（0.1.7 起改为在各分组内部靠前。）
-- **0.2.0** 适配 DSH `0.1.2-rc.1`: `lastTurnEnd` 改走 `seq` / `eventAt` (DSH-0.1.2-A4-03); `maxRetries` 默认改回 5 (不再盖掉官方默认); `autoContinue` 覆盖 `max-tokens` / `interrupted` / 瞬时 `turn/end error` (含 JSON 截断). 声明 `peerDependencies.@deepseek-ai/dsh = 0.1.2-rc.1`.
-- 默认 `enabled: false` = 完全旁路: 不开启覆盖时, 不改同一请求重试. `autoContinue` 同样默认关闭.
+- **0.1.3 新增** `retryableCodes`：可勾选的额外重试错误码，与各 provider 自带列表 **合并（去重）而非替换**。默认补入 `INVALID_REQUEST` + `PI_AI_ERROR`，开箱即重试 OpenAI 式 HTTP 400（thinking 模式 `reasoning_text`）与流式失败兜底码。
+- 默认 `enabled: false` = 完全旁路：不开启覆盖时，不改动任何东西。
 
 ## 安装
 
@@ -25,12 +32,12 @@ DSH "LLM 自动重试" 设置页: 在 **设置 -> LLM 自动重试** 调整同�
 ### 方式 A —— GitHub Release 安装包（推荐）
 
 ```bash
-# 1. 从 v0.1.8 release 下载打包好的插件 tgz
-gh release download v0.1.8 -R zeng6125-rgb/dsh-llm-retry-settings
+# 1. 从 v0.1.12 release 下载打包好的插件 tgz
+gh release download v0.1.12 -R zeng6125-rgb/dsh-llm-retry-settings
 
 # 2. 解压进 profile 的 node_modules
 mkdir -p ~/.dsh/profiles/web/node_modules
-tar -xzf dsh-llm-retry-settings-0.1.8.tgz -C ~/.dsh/profiles/web/node_modules/
+tar -xzf dsh-llm-retry-settings-0.1.12.tgz -C ~/.dsh/profiles/web/node_modules/
 mv ~/.dsh/profiles/web/node_modules/package \
    ~/.dsh/profiles/web/node_modules/dsh-llm-retry-settings
 
@@ -42,8 +49,12 @@ mv ~/.dsh/profiles/web/node_modules/package \
 
 `dsh plugin` 命令会把参数转发给 profile 目录里的 `pnpm`：
 
-```shell
-dsh plugin --profile web add github:azazo1/dsh-llm-retry-settings
+```bash
+# 从 git 仓库安装（pnpm 会 clone；lib/ 已提交，无需构建）
+dsh plugin --profile web add github:zeng6125-rgb/dsh-llm-retry-settings
+
+# 或从 release tarball 地址安装
+dsh plugin --profile web add https://github.com/zeng6125-rgb/dsh-llm-retry-settings/releases/download/v0.1.12/dsh-llm-retry-settings-0.1.12.tgz
 ```
 
 装完还需要在 profile 里启用：把 `"dsh-llm-retry-settings"` 加进 `dsh.profile.bundles`（或使用 Desktop 的插件管理 UI），然后重启 DSH。
@@ -52,11 +63,11 @@ dsh plugin --profile web add github:azazo1/dsh-llm-retry-settings
 
 ### 方式 C —— 源码
 
-```shell
-git clone https://github.com/azazo1/dsh-llm-retry-settings.git
+```bash
+git clone https://github.com/zeng6125-rgb/dsh-llm-retry-settings.git
 cd dsh-llm-retry-settings
-pnpm install
-pnpm run build
+npm install
+npm run build        # node scripts/build.mjs → lib/index.js + lib/client.js（不需要 DSH 源码树）
 ```
 
 把本地构建 link 进 profile 并注册 bundle：
@@ -68,10 +79,11 @@ dsh plugin --profile web link "$PWD"
 
 ## 使用
 
-1. 打开 DSH **设置 -> LLM 自动重试**.
-2. 打开 **开启覆盖** (`enabled`) 才会改同一请求重试.
-3. 设置 `maxRetries` / 退避 / 可重试错误码, 点 **保存**. 默认 `maxRetries` 为 5.
-4. 需要的话打开 **截断与瞬时失败自动续写** (`autoContinue`) 并设置 `maxContinuations`. 它覆盖输出截断, 崩溃孤儿, 以及 `PI_AI_ERROR` / JSON 截断这类瞬时 `turn/end` 失败.
+1. 打开 DSH **设置 → General**。
+2. 找到 **LLM 自动重试** 卡片。
+3. 打开 **开启覆盖**（`enabled`）。
+4. 设置 `maxRetries` / `initialDelayMs` / `maxDelayMs` / `jitterRatio`，按需点选 **可重试错误码** chip；清单里没有的码可以在 `自定义` 分组里输入后点**添加**，最后点 **保存**。
+5. 需要的话打开**输出截断自动续写**（`autoContinue`）并设置 `maxContinuations` 上限——它与上面的重试覆盖互不影响。续写要发的那句话可以在**续写提示词**里改，留空即用内置文案。
 
 改动会写入 `dsh-llm-retry` 设置命名空间，重试引擎实时生效。
 
@@ -103,6 +115,10 @@ dsh plugin --profile web link "$PWD"
 | `retryableCodes` | string[] | `["INVALID_REQUEST", "PI_AI_ERROR"]` | 额外视为可重试的错误码，与各 provider 自带列表合并。 |
 | `autoContinue` | boolean | `false` | 回合因输出 token 上限被截断时，自动补一轮「继续」。 |
 | `maxContinuations` | integer（≥ 0） | `2` | 同一次截断后连续续写的上限（`0` = 永不续写）。 |
+| `continuationPrompt` | string | `""` | 截断后自动发给模型的那句话；留空（或只有空白）使用内置文案。 |
+| `continueOnError` | boolean | `false` | 重试次数用尽后，若结束原因是瞬时错误（超时 / 传输 / 服务端 / 流中断 / 空响应），也补一轮续写；确定性错误不补。 |
+| `overrides` | array | `[]` | 按 provider / model 的策略。每行 `{ provider, model, maxRetries, initialDelayMs, maxDelayMs, jitterRatio }`；`*` 或留空 = 任意，数值 `-1` = 继承全局值。按顺序取第一条命中。 |
+| `logPath` | string | （宿主注入） | **只读。** 宿主日志绝对路径，由宿主半边注入给卡片的「打开日志」按钮，不写回设置文件。 |
 
 ## 工作原理
 
@@ -115,19 +131,22 @@ agent/request-error  →  [本插件：覆盖次数/退避]  →  dsh-llm-retry 
 自动续写那一半走的是会话事件流，因为被截断的回复本质上是一次**成功**的请求：
 
 ```text
-适配器 finish="max-tokens"  →  agent-loop turn/end{reason:"max-tokens"}  →  [本插件]  →  agent.followup("继续")
+适配器 finish="max-tokens"  →  agent-loop turn/end{reason:"max-tokens"}  →  [本插件]  →  agent.followup(continuationPrompt || 内置文案)
 ```
 
 不能用 `agent/turn-stopping`：它的 payload 里没有结束原因，分不清「模型说完了」和「模型被截断了」。
 续写消息的 `source.kind` 是 `plugin`，因此聊天里渲染成一条标注 `dsh-llm-retry` 的注入上下文行，而不是伪装成你亲自发的消息。
 构造期种子事件（resume / fork / replay）不会进入 `session/event`，所以重新打开一个历史上被截断过的旧会话不会触发续写。
 
+哪种措辞有效取决于 provider：有些中转不会在下一轮请求里回显上一段的 `reasoning`，模型看不到自己的思考停在哪，就可能把任务从头重做。
+遇到这种情况请改 `continuationPrompt`（例如让它直接作答、不要再长篇思考）——多发几条「继续」是解决不了的。
+
 ## 界面
 
 设置 → General → **LLM 自动重试** 卡片。编辑采用草稿模式：点「保存」提交、「放弃」回滚；保存后会对快照做校验，显示 `已保存 ✓` / `保存失败 ✗`。
 
-卡片内是两块互不影响的能力：上面的重试覆盖（次数 / 退避 / 抖动 + 分组错误码 chip）与下面的**输出截断自动续写**（独立开关 + `maxContinuations` 上限）。
-关闭的那一块会置灰，但开关本身仍可点击——开自动续写不需要先开重试覆盖。
+卡片内是两块互不影响的能力：上面的重试覆盖（次数 / 退避 / 抖动 + 分组错误码 chip，另有可自由输入码的 `自定义` 分组）与下面的**输出截断自动续写**（独立开关 + `maxContinuations` 上限 + `continuationPrompt` 输入框）。
+关闭的那一块会置灰且输入框不可编辑，但开关本身仍可点击——开自动续写不需要先开重试覆盖。
 
 ## 依赖
 

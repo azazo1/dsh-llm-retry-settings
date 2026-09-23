@@ -37,6 +37,9 @@ const raw = esbuild
     platform: 'browser',
     jsx: 'automatic',
     external: ['react', 'react/jsx-runtime', '@deepseek-ai/dsh-client-web-react'],
+    // 浏览器产物走压缩：这张卡片的文案/模板/字典让它长得快，但首屏只加载这一份
+    // （宿主 bundle 不压缩——出问题时 lib/index.js 还得能直接读）。
+    minify: true,
     write: false,
     logLevel: 'info',
   })

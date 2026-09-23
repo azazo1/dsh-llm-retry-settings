@@ -1,7 +1,7 @@
 {
   "name": "dsh-llm-retry-settings",
   "version": "0.2.0",
-  "description": "DSH plugin: LLM retry settings for 0.1.2-rc.1. Tune retries/backoff/codes; auto-continue truncated or transient failed turns.",
+  "description": "DSH 插件：LLM 自动重试设置卡片——重试次数/退避/抖动与 25 个错误码可勾选（也能自己输入），可按 provider/model 单独设策略、回答被输出 token 上限截断时自动续写且提示词可改，内置重试观测面板，改完实时生效。",
   "keywords": ["dsh", "dsh-plugin", "llm", "retry", "auto-retry", "auto-continue", "max-tokens", "settings", "deepseek"],
   "type": "module",
   "main": "lib/index.js",
@@ -26,11 +26,8 @@
   "bugs": {
     "url": "https://github.com/azazo1/dsh-llm-retry-settings/issues"
   },
-  "peerDependencies": {
-    "@deepseek-ai/dsh": "0.1.2-rc.1"
-  },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.2"
+    "@deepseek-ai/schemastery": "^3.18.4"
   },
   "dsh": {
     "client": {
