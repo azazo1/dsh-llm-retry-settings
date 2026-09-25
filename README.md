@@ -1,12 +1,15 @@
 # dsh-llm-retry-settings
 
-A settings card for the DSH LLM auto-retry engine (`@deepseek-ai/dsh-llm-retry`). Tune the retry count and backoff from **Settings → General**; changes take effect immediately. Since 0.1.7 it can also **auto-continue a reply that was cut off by the output-token limit**; since 0.1.9 both the extra error codes and the continuation prompt are yours to write.
+A configuration page for the DSH LLM auto-retry engine (`@deepseek-ai/dsh-llm-retry`). Tune the retry count and backoff from the plugin's own page in the **Plugins** manager; changes take effect immediately. Since 0.1.7 it can also **auto-continue a reply that was cut off by the output-token limit**; since 0.1.9 both the extra error codes and the continuation prompt are yours to write.
 
 [中文说明](./README.zh-CN.md)
 
 ## Features
 
-- **Includes the settings UI** (client bundle `lib/client.js`): a card in **Settings → General** — no separate UI package needed.
+- **Includes the configuration UI** (client bundle `lib/client.js`): a card on this bundle's page in the Plugins manager — no separate UI package needed.
+- **Adapted** to kernel **0.1.7-rc.2**: the page moved from a standalone Settings section to the Plugins manager's `plugins.bundle.config` slot (keyed by package name), the form frame is the official `SettingsForm`, controls reuse the official `ui-primitives` wherever one exists, and the 0.1.6 dual-version compatibility layers are gone.
+- **Fixed** — the two observation routes (`stats` / `log`) now register through `connection.fetch.register` under the `/api` channel. They used to be exact routes on `webServer`, outside the `/api` prefix, so they never passed the kernel's Host/Origin fence or the browser session cookie check: any local process could read them and DNS rebinding went straight through. Authentication is now the `/api` prefix's admission, which the plugin cannot forget to call.
+- **Fixed** — controls no longer jump on click. The error-code chips used to float picked codes to the front of their group, so clicking one moved it to the group's head or tail and dragged its neighbours along; the order is now the catalogue order and a click only changes the fill. Each group title shows its picked count (0 included) and the Custom group is always rendered, so neither the title row nor anything below it shifts with the selection.
 - Overrides `maxRetries`, `initialDelayMs`, `maxDelayMs`, and `jitterRatio` on the `agent/request-error` retry policy.
 - **New in 0.1.12** — auto-continue failed on session format v4: message sources must now be producer-owned, so the continuation carries `source.kind = "plugin:dsh-llm-retry"` instead of the retired `{kind:"plugin"}` wrapper; the "continuation landed" line in host.log is detected again.
 - **New in 0.1.11** — compatible with the new kernel **0.1.7-alpha.1** (the settings API moved to `SettingsForms`: volatile form fields, live config sync via `loader/volatile-update`, the card reads/writes through `remote.settings`).
@@ -20,8 +23,8 @@ A settings card for the DSH LLM auto-retry engine (`@deepseek-ai/dsh-llm-retry`)
 - **New in 0.1.8** — the host half writes a low-frequency decision log to `~/.dsh/logs/dsh-llm-retry-settings/host.log` (capped at 256 KB) and the card points at it. See [Troubleshooting](#troubleshooting).
 - **New in 0.1.7** — error-code list re-audited against the current host build: added `PI_AI_NOT_WARMED` (adapter warm-up race; a delayed retry usually succeeds) plus three amber "retrying will not help" codes (`UNKNOWN_MODEL`, `UNSUPPORTED_OPTION`, `REQUEST_EXTENSION`). Also clarified `TIMEOUT`: a stalled SSE stream (stream-idle watchdog) is reported as `TIMEOUT` — there is no separate code for it, so the host default retry list already covers hangs.
 - **New in 0.1.7** — **auto-continue on output truncation** (`autoContinue`, off by default). Hitting the output-token ceiling is *not* a request failure — the call returns successfully with `finish = max-tokens` — so no retry policy can ever cover it. When enabled, the plugin watches `turn/end` and queues one follow-up continuation turn per truncation, at most `maxContinuations` times in a row (the counter resets when the model finishes normally or you send a new message).
-- **New in 0.1.7** — the error-code chips are grouped into six categories ordered by "will retrying help": transient → rate limit & quota → request & parameters → content & capability → credentials → abort & fallback. Each group shows how many of its codes you selected; picked codes still float to the front *within their own group*.
-- **New in 0.1.5** — selected error codes float to the front of the chip list, with the unselected ones after them; the order inside each group stays fixed, so chips never jump around when you toggle them. (Since 0.1.7 the floating happens within each category group.)
+- **New in 0.1.7** — the error-code chips are grouped into six categories ordered by "will retrying help": transient → rate limit & quota → request & parameters → content & capability → credentials → abort & fallback. Each group title shows how many of its codes you selected.
+- **New in 0.1.5** — selected error codes floated to the front of the chip list, with the unselected ones after them. (Retired: that made a clicked chip jump position — see the click-jump fix above. The order inside each group is now constant.)
 - **New in 0.1.3** — configurable `retryableCodes`: extra failure codes to retry on, **merged** into each provider's own list (never replaces it). Defaults to `INVALID_REQUEST` + `PI_AI_ERROR`, so OpenAI-style HTTP 400 errors (thinking-mode `reasoning_text`) and generic stream failures get retried out of the box.
 - Default `enabled: false` = fully bypassed; nothing changes until you enable the override.
 
@@ -67,8 +70,8 @@ Then enable the plugin in the profile: add `"dsh-llm-retry-settings"` to `dsh.pr
 ```bash
 git clone https://github.com/zeng6125-rgb/dsh-llm-retry-settings.git
 cd dsh-llm-retry-settings
-npm install
-npm run build        # node scripts/build.mjs → lib/index.js + lib/client.js (no DSH checkout needed)
+pnpm install
+pnpm run build       # node scripts/build.mjs → lib/index.js + lib/client.js (no DSH checkout needed)
 ```
 
 Link the local build into the profile and register the bundle:
@@ -80,13 +83,13 @@ dsh plugin --profile web link "$PWD"
 
 ## Usage
 
-1. Open DSH **Settings → General**.
-2. Find the **LLM 自动重试** card.
-3. Toggle **开启覆盖** (`enabled`) to apply the override.
-4. Set `maxRetries` / `initialDelayMs` / `maxDelayMs` / `jitterRatio`, pick extra **retryable codes** (chips) — or type a code the list does not know into the `自定义` group — and click **保存**.
-5. Optionally toggle **输出截断自动续写** (`autoContinue`) and set its `maxContinuations` cap — independent of the retry override above. The line it sends can be rewritten in **续写提示词**; leave it empty for the built-in wording.
+1. Open the **Plugins** entry in the DSH sidebar.
+2. Under **Installed**, open `dsh-llm-retry-settings`; its configuration sits right below the plugin description.
+3. Turn on the **Override retry policy** switch (`enabled`).
+4. Set `maxRetries` / `initialDelayMs` / `maxDelayMs` / `jitterRatio`, pick extra **retryable codes** (chips) — or type a code the list does not know into the `Custom` group — and click **Save**.
+5. Optionally toggle **Auto-continue on truncation** (`autoContinue`) and set its `Max consecutive continuations` cap — independent of the retry override above. The line it sends can be rewritten in **Continuation prompt**; leave it empty for the built-in wording.
 
-Changes are written to the `dsh-llm-retry` settings namespace and picked up live by the retry engine.
+Changes are written to the profile entry `llm-retry-settings` (the settings namespace is the profile entry id) and picked up live by the retry engine.
 
 ## Troubleshooting
 
@@ -147,23 +150,23 @@ sending more "continue" messages cannot fix it.
 
 ## UI
 
-Settings → General → **LLM 自动重试** card. Edits are draft-based: click **保存** to commit or **放弃** to discard. After saving, the card verifies the write against the settings snapshot and shows `已保存 ✓` / `保存失败 ✗`.
+Plugins manager → Installed → `dsh-llm-retry-settings` → the configuration region right below the plugin description. Edits are draft-based: only **Save** writes to the profile patch layer, and leaving the page drops the unsaved drafts — which is why there is no separate Discard button.
 
-The card holds two independent sections: the retry override (count / backoff / jitter plus the grouped error-code chips, with a `自定义` group that
-accepts free-form codes) and **输出截断自动续写** (its own switch, the `maxContinuations` cap and the `continuationPrompt` textarea). A switched-off
-section is dimmed and its inputs are disabled, but the switch itself stays clickable — turning auto-continue on does not require the retry override to be on.
+The structure follows the official settings UI: boolean fields are rows with the label and its notes on the left and the switch on the right; numbers use the official `SettingsValueField` (the label row carries "Overridden / Reset to default", which appears as soon as you change something); the four pieces the official components have no equivalent for (backoff curve, error-code multi-select, provider/model override table, observation panel) are wrapped in the official `fieldset` + `legend` container. The page does not repeat the plugin name or description — the Plugins page already shows those above it.
+
+The two switches (**Override retry policy** / **Auto-continue on truncation**) each own one half of the configuration. While a switch is off its contents stay **editable**: set them up the way you want, then turn the switch on to make them take effect — until then those values never reach a request. The error-code chips keep a constant order inside a group, so clicking one only changes its selected state.
 
 ## Requirements
 
 - Host plugin: `@deepseek-ai/dsh-llm-retry`
-- Client runtime: `@deepseek-ai/dsh-client-web-react`
-- DSH `settings` service
+- Kernel services: `settings` (SettingsForms), `connection` (the authenticated channel the observation routes register on, a soft dependency)
+- Browser platform modules: `react`, `@deepseek-ai/dsh-client-ui-primitives` (the official form frame and atoms), `@deepseek-ai/dsh-client-store`, `@deepseek-ai/dsh-client-ui-slots`
 
 ## Build
 
 ```bash
-npm run build        # node scripts/build.mjs
-npm run typecheck    # tsc --noEmit
+pnpm run build        # node scripts/build.mjs
+pnpm run typecheck    # tsc --noEmit
 ```
 
 ## License

@@ -1,10 +1,14 @@
 /**
- * 构建脚本（跨平台 node 版，替代依赖 bash 的 scripts/build.sh）：
- *   1. 宿主：src/index.ts → lib/index.js（ESM 自包含 bundle，node20）
- *   2. 客户端：src/client/index.jsx → CJS bundle → 包 window.__ModuleLoader__.load 壳 → lib/client.js
+ * 构建脚本 (跨平台 node 版):
+ *   1. 宿主: src/index.ts → lib/index.js (ESM 自包含 bundle, node20)
+ *   2. 客户端: src/client/index.tsx → CJS bundle → 包 window.__ModuleLoader__.load 壳 → lib/client.js
  *
- * esbuild 经 JS API 调用（0.28.x，pnpm 布局下 createRequire 可解析；.bin shim 在
- * Windows/pnpm 下不可靠，勿用）。客户端中间产物只在内存，不落盘。
+ * esbuild 经 JS API 调用 (0.28.x, pnpm 布局下 createRequire 可解析; .bin shim 在
+ * Windows/pnpm 下不可靠, 勿用). 客户端中间产物只在内存, 不落盘.
+ *
+ * 客户端只外置宿主页面已经共享的平台模块 (`PLATFORM_MODULES`, 见
+ * `packages/client/web/src/platform.ts`); 其余 (含 schemastery 与各 client 包的
+ * 类型声明) 一律内联或被类型擦除.
  */
 import { createRequire } from 'node:module'
 import fs from 'node:fs'
@@ -14,10 +18,25 @@ import { fileURLToPath } from 'node:url'
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const require = createRequire(path.join(root, 'package.json'))
 const esbuild = require('esbuild')
+const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
 
-const CLIENT_ID = 'dsh-llm-retry-settings'
+/** 注册 id = 包名: loader 按插件 id 找模块表里的同名工厂. */
+const CLIENT_ID = manifest.name
 
-// 1) 宿主半边：ESM 自包含——运行环境是 junction 链接的插件包，没有完整依赖树
+/** 页面冻结模块表里的平台模块; 不在这里的一律打进 bundle. */
+const PLATFORM_MODULES = [
+  'react',
+  'react/jsx-runtime',
+  'react-dom',
+  'react-dom/client',
+  '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-store',
+  '@deepseek-ai/dsh-client-ui-slots',
+  '@deepseek-ai/dsh-client-ui-primitives',
+  '@deepseek-ai/dsh-client-ui-dockkit',
+]
+
+// 1) 宿主半边: ESM 自包含——运行环境是链接进 profile 的插件包, 没有完整依赖树
 esbuild.buildSync({
   entryPoints: [path.join(root, 'src/index.ts')],
   bundle: true,
@@ -28,24 +47,25 @@ esbuild.buildSync({
   logLevel: 'info',
 })
 
-// 2) 客户端半边：浏览器 CJS，react / dsh-client-web-react 由页面 runtime 提供
+// 2) 客户端半边: 浏览器 CJS, 平台模块由页面 runtime 经 factory 注入的 require 提供
 const raw = esbuild
   .buildSync({
-    entryPoints: [path.join(root, 'src/client/index.jsx')],
+    entryPoints: [path.join(root, 'src/client/index.tsx')],
     bundle: true,
     format: 'cjs',
     platform: 'browser',
+    target: 'es2022',
     jsx: 'automatic',
-    external: ['react', 'react/jsx-runtime', '@deepseek-ai/dsh-client-web-react'],
-    // 浏览器产物走压缩：这张卡片的文案/模板/字典让它长得快，但首屏只加载这一份
-    // （宿主 bundle 不压缩——出问题时 lib/index.js 还得能直接读）。
+    external: PLATFORM_MODULES,
+    // 浏览器产物走压缩: 这张卡片的文案/字典/清单让它长得快, 但首屏只加载这一份
+    // (宿主 bundle 不压缩——出问题时 lib/index.js 还得能直接读).
     minify: true,
     write: false,
     logLevel: 'info',
   })
   .outputFiles[0].text
 
-// 包上 __ModuleLoader__ 壳（web 端插件加载约定）：factory 内自建 module/exports，
+// 包上 __ModuleLoader__ 壳 (web 端插件加载约定): factory 内自建 module/exports,
 // 返回 module.exports
 const wrapped =
   `window.__ModuleLoader__.load({id: ${JSON.stringify(CLIENT_ID)},factory: (require) => {` +
