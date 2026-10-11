@@ -107,6 +107,18 @@ dsh plugin --profile web link "$PWD"
 
 **改宿主半边（`lib/index.js`）必须重启 DSH。** 客户端卡片刷新页面即可，agent 不会热重载。
 
+## 重复输出保护
+
+在插件配置页打开 **重复输出自动截断** (`repeatDetection`), 并保存. 若要截断后自动发送继续, 同时打开 `autoContinue`, 将 `maxContinuations` 设为大于 0.
+
+- 思维链和正文分别实时检测, 不检测工具参数, 标题生成或上下文压缩.
+- 默认在连续重复至少 8 次, 且重复片段累计至少 256 个 Unicode 字符时中止. 两个阈值必须同时满足. 检查间隔为 32 个新字符, 重复单元最长为 1024 个字符, 内存窗口有上限.
+- 只检测连续精确重复, 不检测意思相近的句子. 正常的长串重复也可能命中, 可提高阈值或关闭保护.
+- 使用 agent 的公开取消接口停止生成, 保留已有输出, 不删除历史中的重复尾部. 聊天中该回复会标记为中断, 不会伪装成撞到 token 上限.
+- 已开始但未执行的工具调用由宿主丢弃, 不补造工具结果. 已排队的用户消息保留, 并优先于自动续写.
+- 重复中止, token 截断和错误续写共用同一个续写次数上限. 真人手动停止, 其他插件中止和恢复旧会话不触发重复续写.
+- `repeatContinuationPrompt` 留空时使用重复专用指令, 要求停止重复并继续有效内容. 观测面板显示重复截断次数及类型, 日志不保存实际模型输出.
+
 ## 配置项
 
 | 键 | 类型 | 默认值 | 说明 |
@@ -121,6 +133,10 @@ dsh plugin --profile web link "$PWD"
 | `maxContinuations` | integer（≥ 0） | `2` | 同一次截断后连续续写的上限（`0` = 永不续写）。 |
 | `continuationPrompt` | string | `""` | 截断后自动发给模型的那句话；留空（或只有空白）使用内置文案。 |
 | `continueOnError` | boolean | `false` | 重试次数用尽后，若结束原因是瞬时错误（超时 / 传输 / 服务端 / 流中断 / 空响应），也补一轮续写；确定性错误不补。 |
+| `repeatDetection` | boolean | `false` | 实时检测连续重复并中止生成. 自动继续还需要开启 `autoContinue`. |
+| `repeatMinRepeats` | integer (3-20) | `8` | 最少连续重复次数, 与字符阈值同时满足才截断. |
+| `repeatMinChars` | integer (64-8192) | `256` | 最少重复 Unicode 字符数. |
+| `repeatContinuationPrompt` | string | `""` | 重复中止后的专用续写指令, 留空使用内置文案. |
 | `overrides` | array | `[]` | 按 provider / model 的策略。每行 `{ provider, model, maxRetries, initialDelayMs, maxDelayMs, jitterRatio }`；`*` 或留空 = 任意，数值 `-1` = 继承全局值。按顺序取第一条命中。 |
 | `logPath` | string | （宿主注入） | **只读。** 宿主日志绝对路径，由宿主半边注入给卡片的「打开日志」按钮，不写回设置文件。 |
 
@@ -163,9 +179,8 @@ agent/request-error  →  [本插件：覆盖次数/退避]  →  dsh-llm-retry 
 
 ## 构建
 
-```bash
-pnpm run build        # node scripts/build.mjs
-pnpm run typecheck    # tsc --noEmit
+```shell
+just verify           # 类型检查, 构建和无凭据回归测试
 ```
 
 ## License

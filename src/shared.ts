@@ -58,6 +58,16 @@ export const DEFAULT_RETRYABLE_CODES = ['INVALID_REQUEST', 'PI_AI_ERROR']
 export const DEFAULT_CONTINUATION_PROMPT =
   '上一条回复因达到输出 token 上限被截断。请从中断处直接继续输出，不要重复已经输出的内容，也不要重新开头。'
 
+export const DEFAULT_REPEAT_CONTINUATION_PROMPT =
+  '上一条回复因连续重复输出被自动中止. 请停止重复已经输出的内容, 从有效内容的中断处继续完成任务. 如果思考陷入循环, 请换一种思路或直接给出答案, 不要重新开头.'
+
+export const REPEAT_LIMITS = {
+  minRepeats: 3,
+  maxRepeats: 20,
+  minChars: 64,
+  maxChars: 8192,
+}
+
 /**
  * 全部默认值.
  *
@@ -76,6 +86,11 @@ export const DEFAULTS = {
   continuationPrompt: '',
   /** 瞬时错误 (重试彻底失败) 也自动续写一轮; 默认关闭. */
   continueOnError: false,
+  /** 重复检测默认关闭, 启用后截断独立生效, 续写仍由 autoContinue 控制. */
+  repeatDetection: false,
+  repeatMinRepeats: 8,
+  repeatMinChars: 256,
+  repeatContinuationPrompt: '',
   /** provider/model 级策略覆盖; 空数组 = 全部沿用全局值. */
   overrides: [] as PolicyOverride[],
 }
@@ -97,6 +112,13 @@ export interface Config {
   continuationPrompt: string
   /** 会话因瞬时错误结束时也自动续写一轮 (确定性错误不续写). */
   continueOnError: boolean
+  /** 实时检测思维链和正文的连续精确重复, 中止当前回合但保留用户排队输入. */
+  repeatDetection: boolean
+  /** 同时满足次数与字符数阈值才中止. */
+  repeatMinRepeats: number
+  repeatMinChars: number
+  /** 重复中止后的续写提示词, 空字符串使用内置重复专用文案. */
+  repeatContinuationPrompt: string
   /** provider/model 级策略覆盖, 按顺序取第一条命中. */
   overrides: PolicyOverride[]
   /** 只读: 宿主日志的绝对路径 (卡片用它打开日志). */

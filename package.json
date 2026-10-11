@@ -66,6 +66,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "test": "node scripts/test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
 }

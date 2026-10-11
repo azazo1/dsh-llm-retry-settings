@@ -29,7 +29,7 @@ export class LiveConfig {
    */
   constructor(config: Partial<Config> | undefined) {
     this.live = normalizeConfig(config)
-    setDiagActive(this.live.enabled || this.live.autoContinue)
+    setDiagActive(this.live.enabled || this.live.autoContinue || this.live.repeatDetection)
   }
 
   /** 最近一次同步后的值 (不触发重读). */
@@ -67,6 +67,6 @@ export class LiveConfig {
     this.lastRaw = next
     Object.assign(this.live, coerceConfig(next, this.live))
     // 两个功能都关着 → 诊断日志静默 (热路径零 I/O); 任一开启 → 正常记录.
-    setDiagActive(this.live.enabled || this.live.autoContinue)
+    setDiagActive(this.live.enabled || this.live.autoContinue || this.live.repeatDetection)
   }
 }

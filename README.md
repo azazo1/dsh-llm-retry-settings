@@ -109,6 +109,14 @@ Read the last lines:
 
 **Host-half changes (`lib/index.js`) need a DSH restart.** The client card reloads with the page; the agent does not.
 
+## 重复输出保护
+
+启用 `repeatDetection` 并保存后, 插件实时检测思维链和正文的连续精确重复. 默认要求至少 8 次重复及 256 个 Unicode 字符, 两个阈值同时满足才中止. 每 32 个新字符检查一次, 重复单元最多 1024 个字符, 内存窗口有上限. 正常长串重复也可能命中, 可提高阈值或关闭保护.
+
+中止采用 agent 的公开取消接口, 保留已输出内容但不删除重复尾部, 不伪造 token 上限, 不保留未执行的工具调用. 工具参数, 上下文压缩和标题生成不检测. 聊天中该回复会标记为中断.
+
+要自动发送继续, 同时开启 `autoContinue`, 且 `maxContinuations` 大于 0. 重复, token 截断和错误续写共用该上限, 已排队的用户消息保留且优先. 真人停止, 其他插件中止和旧会话恢复不触发重复续写. `repeatContinuationPrompt` 留空时使用停止重复并继续有效内容的专用指令. 观测面板记录次数和类型, 不保存原始输出文本.
+
 ## Configuration
 
 | Key | Type | Default | Description |
@@ -123,6 +131,10 @@ Read the last lines:
 | `maxContinuations` | integer (≥ 0) | `2` | Cap on consecutive auto-continuations per truncation (`0` = never continue). |
 | `continuationPrompt` | string | `""` | The line sent to the model after a truncation; empty (or whitespace-only) falls back to the built-in wording. |
 | `continueOnError` | boolean | `false` | Also continue once when a turn ends in a transient error after the retries are exhausted (timeout / transport / server / stream break / empty response). Deterministic failures are never continued. |
+| `repeatDetection` | boolean | `false` | 实时检测连续重复并中止生成. 自动继续还需要开启 `autoContinue`. |
+| `repeatMinRepeats` | integer (3-20) | `8` | 最少连续重复次数, 与字符阈值同时满足才截断. |
+| `repeatMinChars` | integer (64-8192) | `256` | 最少重复 Unicode 字符数. |
+| `repeatContinuationPrompt` | string | `""` | 重复中止后的专用续写指令, 留空使用内置文案. |
 | `overrides` | array | `[]` | Per provider/model policy. Each row: `{ provider, model, maxRetries, initialDelayMs, maxDelayMs, jitterRatio }`; `*` or empty matches anything, and a numeric `-1` inherits the global value. First matching row wins. |
 | `logPath` | string | (host-injected) | **Read-only.** Absolute path of the host log, injected by the host half for the card's "Open log" button. Not persisted. |
 
@@ -165,9 +177,8 @@ The two switches (**Override retry policy** / **Auto-continue on truncation**) e
 
 ## Build
 
-```bash
-pnpm run build        # node scripts/build.mjs
-pnpm run typecheck    # tsc --noEmit
+```shell
+just verify           # 类型检查, 构建和无凭据回归测试
 ```
 
 ## License

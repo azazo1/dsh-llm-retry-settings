@@ -19,7 +19,8 @@ import type { Context } from '@deepseek-ai/cordis'
 // cordis 的 Events 表, 运行时不需要这两个包.
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-session'
-import { DEFAULT_CONTINUATION_PROMPT, PRODUCER_ID } from '../shared.ts'
+import { DEFAULT_CONTINUATION_PROMPT, DEFAULT_REPEAT_CONTINUATION_PROMPT, PRODUCER_ID } from '../shared.ts'
+import type { RepetitionGuard } from './repetition/guard.ts'
 import { diag } from './diag.ts'
 import type { LiveConfig } from './live-config.ts'
 import type { Observer } from './observation.ts'
@@ -74,6 +75,7 @@ interface TurnEnd {
   turn: number
   kind: string
   code?: string | undefined
+  reason?: any
 }
 
 /** 从回合结束原因里取错误码 (三个历史落点). */
@@ -108,6 +110,7 @@ function lastTurnEnd(session: SessionLike): TurnEnd | undefined {
       turn: typeof event.data?.turn === 'number' ? event.data.turn : -1,
       kind: typeof reason?.kind === 'string' ? reason.kind : '',
       code: codeOf(reason),
+      reason,
     }
   }
   // 兜底路径每次 idle 都会调用: turn/end 几乎总在尾部, 先扫 24 条, 未命中才放宽到 400.
@@ -185,6 +188,7 @@ export class AutoContinue {
     private readonly live: LiveConfig,
     private readonly models: SessionModels,
     private readonly observer: Observer,
+    private readonly repetition?: RepetitionGuard,
   ) {}
 
   /** 挂上三条事件监听. */
@@ -204,6 +208,10 @@ export class AutoContinue {
       this.states.delete(id)
       this.models.forget(id)
     })
+    this.ctx.on('agent/disposed', ({ agent }) => {
+      this.states.delete(String(agent.session.id))
+    }, { global: true })
+    this.ctx.effect(() => () => { this.states.clear() }, 'dsh-llm-retry-settings: continuation state')
   }
 
   /** 会话账本 (按需创建, 超出上限丢最早插入的). */
@@ -265,6 +273,7 @@ export class AutoContinue {
             'session/event',
             undefined,
             codeOf(reason),
+            reason,
           )
           return
         }
@@ -286,7 +295,7 @@ export class AutoContinue {
       if (session === undefined || session === null || session.id === undefined) return
       const end = lastTurnEnd(session)
       if (end === undefined) return
-      this.handleTurnEnd(session, end.turn, end.kind, 'agent/status', payload.agent, end.code)
+      this.handleTurnEnd(session, end.turn, end.kind, 'agent/status', payload.agent, end.code, end.reason)
     } catch (error) {
       diag(`自动续写处理异常（agent/status）：${String(error)}`)
     }
@@ -308,17 +317,18 @@ export class AutoContinue {
     via: string,
     agentHint?: any,
     errorCode?: string | undefined,
+    reason?: any,
   ): void {
     const config = this.live.current()
     const state = this.stateOf(String(session.id))
     if (state.lastTurn === turn) return
     state.lastTurn = turn
-    // 两种值得补一轮的结束原因: 输出被 token 上限截断; 或瞬时错误把重试耗光了
-    // (后者要用户显式打开 continueOnError, 且只认 TRANSIENT_CONTINUE_CODES).
+    const repeated = this.repetition?.take(String(session.id), turn, reason) === true
+      && config.repeatDetection
     const truncation = kind === 'max-tokens'
     const transientFailure = kind === 'error' && config.continueOnError
       && TRANSIENT_CONTINUE_CODES.has(errorCode ?? '')
-    if (!truncation && !transientFailure) {
+    if (!truncation && !transientFailure && !repeated) {
       state.chain = 0
       state.capped = false
       return
@@ -326,7 +336,7 @@ export class AutoContinue {
     diag(
       `turn/end via=${via} session=${session.id} turn=${turn} kind=${kind}`
       + `${transientFailure ? ` code=${errorCode ?? ''}` : ''} autoContinue=${config.autoContinue}`
-      + ` maxContinuations=${config.maxContinuations} chain=${state.chain}`,
+      + ` repeated=${repeated} maxContinuations=${config.maxContinuations} chain=${state.chain}`,
     )
     if (!config.autoContinue) return
     if (state.chain >= config.maxContinuations) {
@@ -409,8 +419,12 @@ export class AutoContinue {
             return
           }
           const fresh = this.live.current()
-          const custom = fresh.continuationPrompt.trim()
-          const prompt = custom === '' ? DEFAULT_CONTINUATION_PROMPT : custom
+          if (!fresh.autoContinue || expectedChain > fresh.maxContinuations
+            || (repeated && !fresh.repeatDetection)) return
+          const custom = (repeated ? fresh.repeatContinuationPrompt : fresh.continuationPrompt).trim()
+          const prompt = custom === ''
+            ? (repeated ? DEFAULT_REPEAT_CONTINUATION_PROMPT : DEFAULT_CONTINUATION_PROMPT)
+            : custom
           agent.followup(makeContinuationMessage(prompt))
           const known = this.models.of(sessionId)
           this.observer.continued({ turn, provider: known?.provider, model: known?.model })

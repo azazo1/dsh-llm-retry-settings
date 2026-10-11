@@ -28,6 +28,10 @@ export interface Config {
   maxContinuations: number
   continuationPrompt: string
   continueOnError: boolean
+  repeatDetection: boolean
+  repeatMinRepeats: number
+  repeatMinChars: number
+  repeatContinuationPrompt: string
   overrides: PolicyOverride[]
   logPath: string
 }
@@ -48,6 +52,10 @@ export declare const DEFAULTS: {
     readonly maxContinuations: number
     readonly continuationPrompt: string
     readonly continueOnError: boolean
+    readonly repeatDetection: boolean
+    readonly repeatMinRepeats: number
+    readonly repeatMinChars: number
+    readonly repeatContinuationPrompt: string
     readonly overrides: PolicyOverride[]
 }
 /** schemastery schema; 每个可编辑字段都标了 `.volatile()`. */

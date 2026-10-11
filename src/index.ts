@@ -20,6 +20,7 @@ import { DIAG_TAG, diag, summaryOf } from './host/diag.ts'
 import { LiveConfig } from './host/live-config.ts'
 import { installObservationRoutes, Observer } from './host/observation.ts'
 import { installRetryPolicy } from './host/policy.ts'
+import { RepetitionGuard } from './host/repetition/guard.ts'
 import { SessionModels } from './host/session-models.ts'
 import { installSettings } from './host/settings.ts'
 
@@ -47,7 +48,9 @@ export function apply(ctx: Context, config: Partial<RetryConfig> | undefined): v
 
   installSettings(ctx, live, config)
   installRetryPolicy(ctx, live, models, observer)
-  new AutoContinue(ctx, live, models, observer).install()
+  const repetition = new RepetitionGuard(ctx, live, models, observer)
+  repetition.install()
+  new AutoContinue(ctx, live, models, observer, repetition).install()
   installObservationRoutes(ctx, observer, {
     config: () => live.current(),
     models: () => models.snapshot(),

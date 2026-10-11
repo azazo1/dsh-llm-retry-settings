@@ -21,7 +21,8 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { useState, type ReactNode } from 'react'
-import { LOG_FILE_DISPLAY } from '../shared.ts'
+import { DEFAULT_REPEAT_CONTINUATION_PROMPT, LOG_FILE_DISPLAY, REPEAT_LIMITS } from '../shared.ts'
+import type { TextFieldName } from './settings-form.ts'
 import { BackoffViz } from './backoff.tsx'
 import { CodeChips, FieldGroup, OverridesEditor, SwitchRow, TextAreaField } from './fields.tsx'
 import type { RetryLocaleKey } from './locales.ts'
@@ -100,7 +101,7 @@ export function RetrySettingsCard(props: RetrySettingsCardProps): ReactNode {
     text: string,
     overridden: boolean,
     invalid: boolean,
-    field: 'maxRetriesText' | 'initialDelayMsText' | 'maxDelayMsText' | 'jitterPercentText' | 'maxContinuationsText',
+    field: TextFieldName,
     resetPath: string,
   ): ReactNode => (
     <div className="dsh-lrs-cell" key={id}>
@@ -308,6 +309,49 @@ export function RetrySettingsCard(props: RetrySettingsCardProps): ReactNode {
             ))}
           </select>
         )}
+      />
+
+      <SwitchRow
+        label={t('repeatDetection')}
+        notes={[t('repeatDetectionHint')]}
+        checked={state.repeatDetection}
+        overridden={state.overridden.repeatDetection}
+        overriddenLabel={t('overridden')}
+        resetLabel={t('reset')}
+        disabled={locked}
+        onToggle={props.setRepeatDetection}
+        onReset={() => { props.resetField('repeatDetection') }}
+      />
+      <div className="dsh-lrs-grid">
+        {numberField(
+          'plugin-config-llm-retry-repeat-count', t('repeatMinRepeats'), t('repeatMinRepeatsHint'),
+          state.repeatMinRepeatsText, state.overridden.repeatMinRepeats,
+          !/^\d+$/.test(state.repeatMinRepeatsText.trim())
+            || Number(state.repeatMinRepeatsText) < REPEAT_LIMITS.minRepeats
+            || Number(state.repeatMinRepeatsText) > REPEAT_LIMITS.maxRepeats,
+          'repeatMinRepeatsText', 'repeatMinRepeats',
+        )}
+        {numberField(
+          'plugin-config-llm-retry-repeat-chars', t('repeatMinChars'), t('repeatMinCharsHint'),
+          state.repeatMinCharsText, state.overridden.repeatMinChars,
+          !/^\d+$/.test(state.repeatMinCharsText.trim())
+            || Number(state.repeatMinCharsText) < REPEAT_LIMITS.minChars
+            || Number(state.repeatMinCharsText) > REPEAT_LIMITS.maxChars,
+          'repeatMinCharsText', 'repeatMinChars',
+        )}
+      </div>
+      <TextAreaField
+        id="plugin-config-llm-retry-repeat-prompt"
+        label={t('repeatPrompt')}
+        hint={t('repeatPromptHint')}
+        placeholder={DEFAULT_REPEAT_CONTINUATION_PROMPT}
+        text={state.repeatContinuationPrompt}
+        overridden={state.overridden.repeatContinuationPrompt}
+        overriddenLabel={t('overridden')}
+        resetLabel={t('reset')}
+        disabled={locked}
+        onEdit={(text) => { props.editText('repeatContinuationPrompt', text) }}
+        onReset={() => { props.resetField('repeatContinuationPrompt') }}
       />
 
       <FieldGroup legend={t('groupStats')}>

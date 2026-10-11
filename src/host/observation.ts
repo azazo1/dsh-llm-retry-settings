@@ -24,7 +24,11 @@ export interface StatEntry {
   /** 事件时刻 (ms). */
   t: number
   /** retry=请求失败被重试链路接管; continue=自动续写已投递; cap=续写触顶; skip=因 inbox 忙跳过. */
-  kind: 'retry' | 'continue' | 'cap' | 'skip'
+  kind: 'retry' | 'continue' | 'cap' | 'skip' | 'repeat'
+  channel?: 'text' | 'reasoning'
+  period?: number
+  repeats?: number
+  chars?: number
   code?: string
   provider?: string
   model?: string
@@ -47,6 +51,7 @@ export class Observer {
   private continues = 0
   private capped = 0
   private skipped = 0
+  private repetitions = 0
   private readonly byCode: Record<string, number> = {}
   private readonly byProvider: Record<string, number> = {}
   private readonly recent: StatEntry[] = []
@@ -64,6 +69,20 @@ export class Observer {
       model: entry.model,
       ...entry.turn === undefined ? {} : { turn: entry.turn },
       delayMs: entry.delayMs,
+    })
+  }
+
+  /** 记录重复中止的元数据, 不保存模型输出文本. */
+  repeated(entry: {
+    turn: number; provider?: string | undefined; model?: string | undefined
+    channel: 'text' | 'reasoning'; period: number; repeats: number; chars: number
+  }): void {
+    this.repetitions += 1
+    this.push({
+      t: Date.now(), kind: 'repeat', turn: entry.turn, channel: entry.channel,
+      period: entry.period, repeats: entry.repeats, chars: entry.chars,
+      ...entry.provider === undefined ? {} : { provider: entry.provider },
+      ...entry.model === undefined ? {} : { model: entry.model },
     })
   }
 
@@ -99,6 +118,7 @@ export class Observer {
       continues: this.continues,
       capped: this.capped,
       skipped: this.skipped,
+      repetitions: this.repetitions,
       byCode: { ...this.byCode },
       byProvider: { ...this.byProvider },
       recent: [...this.recent],
@@ -165,6 +185,7 @@ export function installObservationRoutes(ctx: Context, observer: Observer, sourc
             now: Date.now(),
             config: {
               ...config,
+              repeatContinuationPrompt: config.repeatContinuationPrompt.trim() === '' ? '(内置默认)' : '(自定义)',
               continuationPrompt: config.continuationPrompt.trim() === '' ? '(内置默认)' : '(自定义)',
             },
             stats: observer.snapshot(),

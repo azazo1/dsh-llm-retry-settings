@@ -13,6 +13,7 @@ import {
   DEFAULTS,
   OVERRIDE_INHERIT,
   OVERRIDE_MAX_ROWS,
+  REPEAT_LIMITS,
   // 本模块要导出名为 `Config` 的 schema 值 (内核按运行时模块的 `.Config` 取它),
   // 所以配置形状的类型在这里换个名字.
   type Config as ConfigShape,
@@ -51,6 +52,10 @@ export const Config = z.object({
   maxContinuations: z.number().step(1).min(0).default(DEFAULTS.maxContinuations).volatile(),
   continuationPrompt: z.string().default(DEFAULTS.continuationPrompt).volatile(),
   continueOnError: z.boolean().default(DEFAULTS.continueOnError).volatile(),
+  repeatDetection: z.boolean().default(DEFAULTS.repeatDetection).volatile(),
+  repeatMinRepeats: z.number().step(1).min(REPEAT_LIMITS.minRepeats).max(REPEAT_LIMITS.maxRepeats).default(DEFAULTS.repeatMinRepeats).volatile(),
+  repeatMinChars: z.number().step(1).min(REPEAT_LIMITS.minChars).max(REPEAT_LIMITS.maxChars).default(DEFAULTS.repeatMinChars).volatile(),
+  repeatContinuationPrompt: z.string().default(DEFAULTS.repeatContinuationPrompt).volatile(),
   overrides: z
     .array(
       z.object({
@@ -133,6 +138,7 @@ export const DEFAULTS_CONFIG: ConfigShape = { ...DEFAULTS, logPath: LOG_FILE }
 export function coerceConfig(raw: Partial<ConfigShape> | undefined | null, fallback: ConfigShape): ConfigShape {
   const codes = unvol(raw?.retryableCodes)
   const prompt = unvol(raw?.continuationPrompt)
+  const repeatPrompt = unvol(raw?.repeatContinuationPrompt)
   const overrides = unvol(raw?.overrides)
   const logPath = unvol(raw?.logPath)
   const config: ConfigShape = {
@@ -146,6 +152,10 @@ export function coerceConfig(raw: Partial<ConfigShape> | undefined | null, fallb
     maxContinuations: asInt(raw?.maxContinuations, 0) ?? fallback.maxContinuations,
     continuationPrompt: typeof prompt === 'string' ? prompt : fallback.continuationPrompt,
     continueOnError: asBool(raw?.continueOnError) ?? fallback.continueOnError,
+    repeatDetection: asBool(raw?.repeatDetection) ?? fallback.repeatDetection,
+    repeatMinRepeats: Math.min(REPEAT_LIMITS.maxRepeats, asInt(raw?.repeatMinRepeats, REPEAT_LIMITS.minRepeats) ?? fallback.repeatMinRepeats),
+    repeatMinChars: Math.min(REPEAT_LIMITS.maxChars, asInt(raw?.repeatMinChars, REPEAT_LIMITS.minChars) ?? fallback.repeatMinChars),
+    repeatContinuationPrompt: typeof repeatPrompt === 'string' ? repeatPrompt : fallback.repeatContinuationPrompt,
     overrides: normOverrides(overrides, fallback.overrides),
     logPath: typeof logPath === 'string' && logPath !== '' ? logPath : fallback.logPath,
   }

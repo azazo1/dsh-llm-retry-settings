@@ -22,7 +22,11 @@ import type { RetryLocaleKey } from './locales.ts'
 /** 宿主返回的一条记录. */
 interface StatEntry {
   t: number
-  kind: 'retry' | 'continue' | 'cap' | 'skip'
+  kind: 'retry' | 'continue' | 'cap' | 'skip' | 'repeat'
+  channel?: 'text' | 'reasoning'
+  period?: number
+  repeats?: number
+  chars?: number
   code?: string
   provider?: string
   model?: string
@@ -41,6 +45,7 @@ interface StatsResponse {
     continues?: number
     capped?: number
     skipped?: number
+    repetitions?: number
     byCode?: Record<string, number>
     byProvider?: Record<string, number>
     recent?: StatEntry[]
@@ -202,6 +207,7 @@ export function StatsPanel(props: { logPath: string; t: Translate<RetryLocaleKey
             {cell(t('statsContinues'), stats.continues)}
             {cell(t('statsCapped'), stats.capped)}
             {cell(t('statsSkipped'), stats.skipped)}
+            {cell(t('statsRepeats'), stats.repetitions)}
           </div>
           <div className="dsh-lrs-statCols">
             {list(t('statsByCode'), codes)}
@@ -214,6 +220,7 @@ export function StatsPanel(props: { logPath: string; t: Translate<RetryLocaleKey
               <span className="dsh-lrs-statRow" key={`${String(entry.t)}-${String(index)}`}>
                 <span className="dsh-lrs-statKey">{formatClock(entry.t)}</span>
                 <span>{kindLabel(t, entry.kind)}</span>
+                {entry.kind !== 'repeat' ? null : <span>{`${entry.channel ?? ''} ${entry.period ?? 0} x ${entry.repeats ?? 0}`}</span>}
                 {entry.code === undefined || entry.code === '' ? null : <Tag tone="neutral">{entry.code}</Tag>}
                 {entryTarget(entry) === '' ? null : <span className="dsh-lrs-statKey">{entryTarget(entry)}</span>}
               </span>
@@ -254,5 +261,6 @@ function kindLabel(t: Translate<RetryLocaleKey>, kind: StatEntry['kind']): strin
     case 'continue': return t('statsKindContinue')
     case 'cap': return t('statsKindCap')
     case 'skip': return t('statsKindSkip')
+    case 'repeat': return t('statsKindRepeat')
   }
 }

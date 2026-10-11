@@ -91,5 +91,7 @@ export function summaryOf(config: Config): string {
   return `enabled=${config.enabled} codes=${config.retryableCodes.length} maxRetries=${config.maxRetries}`
     + ` backoff=${config.initialDelayMs}~${config.maxDelayMs}ms jitter=${config.jitterRatio}`
     + ` autoContinue=${config.autoContinue} maxContinuations=${config.maxContinuations}`
+    + ` repeatDetection=${config.repeatDetection} repeatMinRepeats=${config.repeatMinRepeats}`
+    + ` repeatMinChars=${config.repeatMinChars}`
     + ` continueOnError=${config.continueOnError} overrides=${config.overrides.length}`
 }

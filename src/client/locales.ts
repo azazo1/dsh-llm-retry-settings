@@ -104,6 +104,16 @@ export type RetryLocaleKey =
   | 'promptTplThinkText'
   | 'continueOnError'
   | 'continueOnErrorHint'
+  | 'repeatDetection'
+  | 'repeatDetectionHint'
+  | 'repeatMinRepeats'
+  | 'repeatMinRepeatsHint'
+  | 'repeatMinChars'
+  | 'repeatMinCharsHint'
+  | 'repeatPrompt'
+  | 'repeatPromptHint'
+  | 'statsRepeats'
+  | 'statsKindRepeat'
   | 'groupBackoff'
   | 'backoffEmpty'
   | 'backoffBudget'
@@ -162,6 +172,16 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 /** 中文文案. */
 export const zh: Record<RetryLocaleKey, string> = {
+  repeatDetection: '重复输出自动截断',
+  repeatDetectionHint: '实时检测思维链和正文中的连续精确重复, 不检测工具参数. 中止后保留已有输出和排队消息. 要自动发送继续, 同时打开自动续写; 共用续写次数上限. 默认关闭.',
+  repeatMinRepeats: '最少连续重复次数',
+  repeatMinRepeatsHint: '3-20 次, 默认 8 次. 必须同时达到字符数阈值.',
+  repeatMinChars: '最少重复字符数',
+  repeatMinCharsHint: '64-8192 个 Unicode 字符, 默认 256. 重复单元最多 1024 个字符. 数值越低越容易误判正常重复.',
+  repeatPrompt: '重复截断后的续写提示词',
+  repeatPromptHint: '留空使用专用文案, 要求停止重复并从有效内容处继续, 不沿用 token 上限提示词.',
+  statsRepeats: '重复截断',
+  statsKindRepeat: '重复截断',
   description: '模型请求失败时的自动恢复策略，以及输出被 token 上限截断时的自动续写。开启重试后以本页值为准覆盖各 provider 的重试次数与退避时间。',
   enabled: '覆盖重试策略',
   enabledHint: '打开并保存后，本插件才覆盖各 provider 的重试次数与退避时间；关闭时完全旁路，不改任何东西。',
@@ -306,6 +326,16 @@ export const zh: Record<RetryLocaleKey, string> = {
 
 /** 英文文案. */
 export const en: Record<RetryLocaleKey, string> = {
+  repeatDetection: 'Stop repetitive output',
+  repeatDetectionHint: 'Detect exact consecutive repetition in reasoning and text, not tool arguments. Stop generation while preserving output and queued messages. Enable auto-continue as well to send a follow-up, using its shared cap. Off by default.',
+  repeatMinRepeats: 'Minimum consecutive repetitions',
+  repeatMinRepeatsHint: '3-20 repetitions, default 8. The character threshold must also be met.',
+  repeatMinChars: 'Minimum repeated characters',
+  repeatMinCharsHint: '64-8192 Unicode characters, default 256. Repeating units up to 1024 characters. Lower thresholds may stop intentional repetition.',
+  repeatPrompt: 'Continuation prompt after repetition',
+  repeatPromptHint: 'Empty uses a dedicated prompt asking the model to stop repeating and continue useful output, not the token-limit prompt.',
+  statsRepeats: 'repeat stops',
+  statsKindRepeat: 'repeat stop',
   description: 'Automatic recovery for failed model requests, plus auto-continue when a reply is cut off by the output token limit. While enabled, this page overrides each provider\'s retry count and backoff.',
   enabled: 'Override retry policy',
   enabledHint: 'Once on and saved, this plugin overrides every provider\'s retry count and backoff; while off it changes nothing at all.',

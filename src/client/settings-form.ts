@@ -18,7 +18,7 @@ import type {
   SettingsFormScope,
   SettingsFormShell,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { OVERRIDE_INHERIT, OVERRIDE_MAX_ROWS, type PolicyOverride } from '../shared.ts'
+import { DEFAULTS, OVERRIDE_INHERIT, OVERRIDE_MAX_ROWS, REPEAT_LIMITS, type PolicyOverride } from '../shared.ts'
 import { CODE_RE } from './codes.ts'
 
 /** 卡片读到的配置形状 (就是 profile patch 里的那几个字段). */
@@ -33,6 +33,10 @@ export interface RetrySettings {
   maxContinuations?: number
   continuationPrompt?: string
   continueOnError?: boolean
+  repeatDetection?: boolean
+  repeatMinRepeats?: number
+  repeatMinChars?: number
+  repeatContinuationPrompt?: string
   overrides?: PolicyOverride[]
   /** 宿主注入的只读日志路径. */
   logPath?: string
@@ -62,6 +66,10 @@ export interface RetryOverrides {
   maxContinuations: boolean
   continuationPrompt: boolean
   continueOnError: boolean
+  repeatDetection: boolean
+  repeatMinRepeats: boolean
+  repeatMinChars: boolean
+  repeatContinuationPrompt: boolean
   overrides: boolean
 }
 
@@ -78,6 +86,10 @@ export interface RetryCardState extends SettingsFormShell {
   maxContinuationsText: string
   continuationPrompt: string
   continueOnError: boolean
+  repeatDetection: boolean
+  repeatMinRepeatsText: string
+  repeatMinCharsText: string
+  repeatContinuationPrompt: string
   overrides: EditableOverride[]
   /** 哪些字段在 profile 的用户层里被覆盖过. */
   overridden: RetryOverrides
@@ -99,6 +111,8 @@ export interface RetryCardFace extends SettingsFormActions {
   setAutoContinue(next: boolean): void
   /** 重试耗尽后也续写开关. */
   setContinueOnError(next: boolean): void
+  /** 实时重复检测开关. */
+  setRepeatDetection(next: boolean): void
   /** 改一个文本草稿字段. */
   editText(field: TextFieldName, text: string): void
   /** 勾选 / 取消一个补充错误码. */
@@ -123,6 +137,9 @@ export type TextFieldName =
   | 'jitterPercentText'
   | 'maxContinuationsText'
   | 'continuationPrompt'
+  | 'repeatMinRepeatsText'
+  | 'repeatMinCharsText'
+  | 'repeatContinuationPrompt'
 
 /** 草稿里可以显式写入的字段. */
 interface FieldValues {
@@ -136,6 +153,10 @@ interface FieldValues {
   maxContinuationsText: string
   continuationPrompt: string
   continueOnError: boolean
+  repeatDetection: boolean
+  repeatMinRepeatsText: string
+  repeatMinCharsText: string
+  repeatContinuationPrompt: string
   overrides: EditableOverride[]
 }
 
@@ -148,6 +169,11 @@ function nonNegativeInt(text: string): number | undefined {
   if (trimmed === '') return undefined
   const parsed = Number(trimmed)
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined
+}
+
+function inRange(text: string, min: number, max: number): boolean {
+  const parsed = nonNegativeInt(text)
+  return parsed !== undefined && parsed >= min && parsed <= max
 }
 
 /** 正整数草稿; 非法时返回 undefined. */
@@ -245,6 +271,7 @@ export class RetrySettingsForm {
       setEnabled: (next) => { this.setField('enabled', next) },
       setAutoContinue: (next) => { this.setField('autoContinue', next) },
       setContinueOnError: (next) => { this.setField('continueOnError', next) },
+      setRepeatDetection: (next) => { this.setField('repeatDetection', next) },
       editText: (field, text) => { this.setField(field, text) },
       toggleCode: (code) => {
         const codes = this.field('retryableCodes')
@@ -386,6 +413,10 @@ export class RetrySettingsForm {
       case 'maxContinuationsText': return String(layer?.maxContinuations ?? 0) as FieldValues[K]
       case 'continuationPrompt': return (layer?.continuationPrompt ?? '') as FieldValues[K]
       case 'continueOnError': return (layer?.continueOnError === true) as FieldValues[K]
+      case 'repeatDetection': return (layer?.repeatDetection === true) as FieldValues[K]
+      case 'repeatMinRepeatsText': return String(layer?.repeatMinRepeats ?? DEFAULTS.repeatMinRepeats) as FieldValues[K]
+      case 'repeatMinCharsText': return String(layer?.repeatMinChars ?? DEFAULTS.repeatMinChars) as FieldValues[K]
+      case 'repeatContinuationPrompt': return (layer?.repeatContinuationPrompt ?? '') as FieldValues[K]
       case 'overrides': return (layer?.overrides ?? []).map(toEditable) as FieldValues[K]
     }
     /* v8 ignore next -- 上面的 case 覆盖了 FieldName 的全部取值 */
@@ -421,11 +452,15 @@ export class RetrySettingsForm {
     const maxDelayMsText = this.field('maxDelayMsText')
     const jitterPercentText = this.field('jitterPercentText')
     const maxContinuationsText = this.field('maxContinuationsText')
+    const repeatMinRepeatsText = this.field('repeatMinRepeatsText')
+    const repeatMinCharsText = this.field('repeatMinCharsText')
     const numbersInvalid = nonNegativeInt(maxRetriesText) === undefined
       || positiveInt(initialDelayMsText) === undefined
       || positiveInt(maxDelayMsText) === undefined
       || percentToRatio(jitterPercentText) === undefined
       || nonNegativeInt(maxContinuationsText) === undefined
+      || !inRange(repeatMinRepeatsText, REPEAT_LIMITS.minRepeats, REPEAT_LIMITS.maxRepeats)
+      || !inRange(repeatMinCharsText, REPEAT_LIMITS.minChars, REPEAT_LIMITS.maxChars)
       || overrides.some((row) => (
         (!isBlank(row.maxRetriesText) && nonNegativeInt(row.maxRetriesText) === undefined)
         || (!isBlank(row.initialDelayMsText) && nonNegativeInt(row.initialDelayMsText) === undefined)
@@ -451,6 +486,10 @@ export class RetrySettingsForm {
       maxContinuationsText,
       continuationPrompt: this.field('continuationPrompt'),
       continueOnError: this.field('continueOnError'),
+      repeatDetection: this.field('repeatDetection'),
+      repeatMinRepeatsText,
+      repeatMinCharsText,
+      repeatContinuationPrompt: this.field('repeatContinuationPrompt'),
       overrides,
       overridden: {
         enabled: this.overriddenOf('enabled'),
@@ -463,6 +502,10 @@ export class RetrySettingsForm {
         maxContinuations: this.overriddenOf('maxContinuationsText'),
         continuationPrompt: this.overriddenOf('continuationPrompt'),
         continueOnError: this.overriddenOf('continueOnError'),
+        repeatDetection: this.overriddenOf('repeatDetection'),
+        repeatMinRepeats: this.overriddenOf('repeatMinRepeatsText'),
+        repeatMinChars: this.overriddenOf('repeatMinCharsText'),
+        repeatContinuationPrompt: this.overriddenOf('repeatContinuationPrompt'),
         overrides: this.overriddenOf('overrides'),
       },
       hostFresh: logPath !== '',
@@ -489,7 +532,9 @@ export class RetrySettingsForm {
     const path = configPathOf(name)
     switch (name) {
       case 'maxRetriesText':
-      case 'maxContinuationsText': {
+      case 'maxContinuationsText':
+      case 'repeatMinRepeatsText':
+      case 'repeatMinCharsText': {
         const parsed = nonNegativeInt(String(value))
         return parsed === undefined || parsed === Number(this.effectiveValue(name))
           ? undefined
@@ -517,7 +562,8 @@ export class RetrySettingsForm {
         const rows = (value as EditableOverride[]).filter((row) => !isBlankOverride(row)).map(toOverride)
         return JSON.stringify(rows) === JSON.stringify(this.effectiveValue(name)) ? undefined : { op: 'set', path: [path], value: rows }
       }
-      case 'continuationPrompt': {
+      case 'continuationPrompt':
+      case 'repeatContinuationPrompt': {
         const text = String(value)
         return text === this.effectiveValue(name) ? undefined : { op: 'set', path: [path], value: text }
       }
@@ -539,6 +585,7 @@ export class RetrySettingsForm {
 function isTextFieldName(field: string): field is TextFieldName {
   return field === 'maxRetriesText' || field === 'initialDelayMsText' || field === 'maxDelayMsText'
     || field === 'jitterPercentText' || field === 'maxContinuationsText' || field === 'continuationPrompt'
+    || field === 'repeatMinRepeatsText' || field === 'repeatMinCharsText' || field === 'repeatContinuationPrompt'
 }
 
 /** 草稿字段名对应的 profile patch 路径. */
@@ -549,6 +596,8 @@ function configPathOf(name: FieldName): string {
     case 'maxDelayMsText': return 'maxDelayMs'
     case 'jitterPercentText': return 'jitterRatio'
     case 'maxContinuationsText': return 'maxContinuations'
+    case 'repeatMinRepeatsText': return 'repeatMinRepeats'
+    case 'repeatMinCharsText': return 'repeatMinChars'
     default: return name
   }
 }
@@ -561,6 +610,10 @@ function draftFieldOf(path: string): FieldName | undefined {
     case 'maxDelayMs': return 'maxDelayMsText'
     case 'jitterRatio': return 'jitterPercentText'
     case 'maxContinuations': return 'maxContinuationsText'
+    case 'repeatMinRepeats': return 'repeatMinRepeatsText'
+    case 'repeatMinChars': return 'repeatMinCharsText'
+    case 'repeatDetection': return 'repeatDetection'
+    case 'repeatContinuationPrompt': return 'repeatContinuationPrompt'
     case 'enabled': return 'enabled'
     case 'retryableCodes': return 'retryableCodes'
     case 'autoContinue': return 'autoContinue'
