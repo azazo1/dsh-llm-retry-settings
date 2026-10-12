@@ -3,6 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { diag } from '../diag.ts'
+import type { GoalRecovery } from '../goal-recovery.ts'
 import type { LiveConfig } from '../live-config.ts'
 import type { Observer } from '../observation.ts'
 import type { SessionModels } from '../session-models.ts'
@@ -31,6 +32,7 @@ export class RepetitionGuard {
     private readonly live: LiveConfig,
     private readonly models: SessionModels,
     private readonly observer: Observer,
+    private readonly goals?: GoalRecovery,
   ) {}
 
   install(): void {
@@ -109,6 +111,10 @@ export class RepetitionGuard {
     try {
       // 使用公开的取消 API, agent-loop 自己提交安全的 text/reasoning 前缀并关闭请求.
       // 保留真人的排队输入, 续写时仍由 AutoContinue 判断是否需要让位.
+      // goal 快照读取失败不得阻止安全中止.
+      try { this.goals?.capture(agent, state.turn) } catch (error) {
+        diag(`捕获 goal 状态失败: ${String(error)}`)
+      }
       agent.cancel({ kind: 'hook', reason: REPEAT_CANCEL_REASON }, { keepInbox: true })
     } catch (error) {
       this.pending.delete(sessionId)

@@ -23,6 +23,7 @@ import { PRODUCER_ID } from '../shared.ts'
 import { recoveryPolicy, type RecoveryKind } from './recovery-policy.ts'
 import type { RepetitionGuard } from './repetition/guard.ts'
 import { diag } from './diag.ts'
+import type { GoalRecovery } from './goal-recovery.ts'
 import type { LiveConfig } from './live-config.ts'
 import type { Observer } from './observation.ts'
 import type { SessionModels } from './session-models.ts'
@@ -191,6 +192,7 @@ export class AutoContinue {
     private readonly models: SessionModels,
     private readonly observer: Observer,
     private readonly repetition?: RepetitionGuard,
+    private readonly goals?: GoalRecovery,
   ) {}
 
   /** 挂上三条事件监听. */
@@ -296,8 +298,9 @@ export class AutoContinue {
   private onAgentStatus(payload: any): void {
     try {
       if (payload === undefined || payload === null || payload.status !== 'idle') return
-      // 关闭自动续写时不必回看日志: 每次 idle 扫 400 条事件是白工.
-      if (!this.live.current().autoContinue) return
+      // 三类恢复独立控制, 不能仅用 token 开关关闭 idle 兜底.
+      const config = this.live.current()
+      if (!config.autoContinue && !config.errorContinue && config.repeatMode !== 'continue') return
       const session = payload.agent?.session
       if (session === undefined || session === null || session.id === undefined) return
       const end = lastTurnEnd(session)
@@ -399,6 +402,8 @@ export class AutoContinue {
     // 正解是官方给的 `whenIdle()`: `await this.activityDone` 直到驱动边界 settle.
     // 截断点分型只用于诊断 (text=yes/no), 判定必须发生在投递前, 通过公开的
     // `seq` / `eventAt` 读取当前会话事件.
+    const goalTicket = repeated ? this.goals?.ticket(agent, turn) : undefined
+    if (!repeated) this.goals?.clear(agent)
     const hasVisibleText = visibleTextBeforeTurnEnd(session, turn)
     const generation = state.generation
     const sessionId = String(session.id)
@@ -421,8 +426,16 @@ export class AutoContinue {
           }
           const fresh = recoveryPolicy(this.live.current(), recovery)
           if (!fresh.enabled || state.counts[recovery] >= fresh.limit) return
-          agent.followup(makeContinuationMessage(fresh.prompt))
-          // 仅成功入队才占预算, 排队让位或投递失败不消耗次数.
+          const message = makeContinuationMessage(fresh.prompt)
+          if (goalTicket) {
+            if (!this.goals?.recover(agent, goalTicket, message)) {
+              diag(`放弃 goal 恢复 session=${sessionId} turn=${turn}: 目标已变化或轮次耗尽`)
+              return
+            }
+          } else {
+            agent.followup(message)
+          }
+          // 仅成功恢复或入队才占预算, 排队让位或投递失败不消耗次数.
           state.counts[recovery] += 1
           const known = this.models.of(sessionId)
           this.observer.continued({ turn, provider: known?.provider, model: known?.model })

@@ -17,6 +17,7 @@ import { DEFAULTS, type Config as RetryConfig } from './shared.ts'
 import { AutoContinue } from './host/auto-continue.ts'
 import { Config as ConfigSchema } from './host/config.ts'
 import { DIAG_TAG, diag, summaryOf } from './host/diag.ts'
+import { GoalRecovery } from './host/goal-recovery.ts'
 import { LiveConfig } from './host/live-config.ts'
 import { installObservationRoutes, Observer } from './host/observation.ts'
 import { installRetryPolicy } from './host/policy.ts'
@@ -48,9 +49,11 @@ export function apply(ctx: Context, config: Partial<RetryConfig> | undefined): v
 
   installSettings(ctx, live, config)
   installRetryPolicy(ctx, live, models, observer)
-  const repetition = new RepetitionGuard(ctx, live, models, observer)
+  const goals = new GoalRecovery(ctx)
+  goals.install()
+  const repetition = new RepetitionGuard(ctx, live, models, observer, goals)
   repetition.install()
-  new AutoContinue(ctx, live, models, observer, repetition).install()
+  new AutoContinue(ctx, live, models, observer, repetition, goals).install()
   installObservationRoutes(ctx, observer, {
     config: () => live.current(),
     models: () => models.snapshot(),

@@ -7,6 +7,7 @@ import { agentCarrier } from '@deepseek-ai/dsh-agent'
 import { AutoContinue } from '../src/host/auto-continue.ts'
 import { normalizeConfig } from '../src/host/config.ts'
 import { setDiagActive } from '../src/host/diag.ts'
+import { GoalRecovery } from '../src/host/goal-recovery.ts'
 import { Observer } from '../src/host/observation.ts'
 import { SessionModels } from '../src/host/session-models.ts'
 import { RepetitionGuard, REPEAT_CANCEL_REASON } from '../src/host/repetition/guard.ts'
@@ -33,12 +34,20 @@ function harness(options = {}) {
     whenIdle: () => idle,
     followup: (message: any) => { delivered.push(message) },
   }
-  Object.assign(ctx, { agents: { get: (id: string) => id === session.id ? agent : undefined } })
+  const injected: any[] = []
+  let initiator: any = agent
+  agent.inject = (message: any) => { injected.push(message) }
+  Object.assign(ctx, { agents: {
+    get: (id: string) => id === session.id ? agent : undefined,
+    currentInitiator: () => initiator,
+  } })
   const observer = new Observer()
   const models = new SessionModels()
-  const guard = new RepetitionGuard(ctx, live as any, models, observer)
+  const goals = new GoalRecovery(ctx)
+  goals.install()
+  const guard = new RepetitionGuard(ctx, live as any, models, observer, goals)
   guard.install()
-  new AutoContinue(ctx, live as any, models, observer, guard).install()
+  new AutoContinue(ctx, live as any, models, observer, guard, goals).install()
   let attempt = 0
   const emitFrame = (frame: any) => ctx.emit(agentCarrier(agent), 'agent/assistant-stream', { agent, frame })
   const start = (turn: number) => {
@@ -60,10 +69,12 @@ function harness(options = {}) {
     const event = { type: 'turn/end', data: { turn, reason: reason ?? { kind: 'aborted', reason: controller.signal.reason } } }
     journal.push(event)
     if (!fallbackOnly) ctx.emit('session/event', session as any, event as any)
+    agent.status = 'idle'
     ctx.emit(agentCarrier(agent), 'agent/status', { agent, status: 'idle' })
   }
   return {
-    ctx, config, agent, guard, observer, delivered, cancellations, start, chunk, end, append,
+    ctx, config, agent, guard, observer, delivered, injected, cancellations, start, chunk, end, append,
+    setInitiator: (value: any) => { initiator = value },
     signal: () => controller.signal,
     wait: () => {
       let release!: () => void
@@ -71,6 +82,130 @@ function harness(options = {}) {
       return release
     },
   }
+}
+
+test('goal 自动暂停后恢复同一目标, 正式驱动负责继续且不重复 followup', async () => {
+  const h = harness({ autoContinue: false, repeatContinuationPrompt: 'goal-repeat-prompt' })
+  const service = mountGoal(h)
+  const revision = service.value.revision
+  const rounds = service.value.roundsStarted
+  h.start(1)
+  h.chunk('text-delta', 'x'.repeat(300))
+  h.end(1, undefined, true)
+  await setImmediate()
+  assert.equal(service.resumes, 1)
+  assert.equal(service.value.phase, 'active')
+  assert.equal(service.value.activation, 'armed')
+  assert.equal(service.value.revision, revision + 2)
+  assert.equal(service.value.roundsStarted, rounds)
+  assert.equal(h.delivered.length, 0)
+  assert.equal(h.injected.length, 1)
+  assert.equal(h.injected[0].content[0].text, 'goal-repeat-prompt')
+  assert.equal(h.injected[0].source.kind, 'plugin:dsh-llm-retry')
+  h.end(1)
+  await setImmediate()
+  assert.equal(service.resumes, 1)
+  await h.ctx.fiber.dispose()
+})
+
+test('普通轮次重复中止解除 activation 后恢复 goal, 原本暂停或未激活的目标不恢复', async () => {
+  for (const initial of [
+    { phase: 'active', activation: 'armed' },
+    { phase: 'paused', activation: 'disarmed' },
+    { phase: 'active', activation: 'disarmed' },
+  ]) {
+    const h = harness()
+    const service = mountGoal(h, initial, false)
+    h.start(1)
+    h.chunk('reasoning-delta', 'x'.repeat(300))
+    h.end(1)
+    await setImmediate()
+    const restore = initial.activation === 'armed'
+    assert.equal(service.resumes, restore ? 1 : 0)
+    assert.equal(h.delivered.length, restore ? 0 : 1)
+    await h.ctx.fiber.dispose()
+  }
+})
+
+test('真人主动暂停, 目标修改, 轮次耗尽及恢复关闭均不重新激活 goal', async () => {
+  for (const change of ['pause', 'edit', 'complete', 'replace', 'exhausted', 'stop', 'cap', 'queued', 'dispose']) {
+    const h = harness()
+    const service = mountGoal(h, {}, true)
+    const release = h.wait()
+    h.start(1)
+    h.chunk('text-delta', 'x'.repeat(300))
+    if (change === 'pause') {
+      h.setInitiator(undefined)
+      service.change('pause')
+      h.setInitiator(h.agent)
+    }
+    h.end(1)
+    if (change === 'edit' || change === 'complete') service.change(change)
+    if (change === 'replace') service.value.id = 'another-goal'
+    if (change === 'exhausted') service.value.maxGoalRounds = service.value.roundsStarted
+    if (change === 'stop') h.config.repeatMode = 'stop'
+    if (change === 'cap') h.config.repeatMaxContinuations = 0
+    if (change === 'queued') h.agent.inbox.nextTurn.push({ source: { kind: 'user' } })
+    if (change === 'dispose') await h.ctx.fiber.dispose()
+    release()
+    await setImmediate()
+    assert.equal(service.resumes, 0, change)
+    assert.equal(h.delivered.length, 0, change)
+    assert.equal(h.injected.length, 0, change)
+    await h.ctx.fiber.dispose()
+  }
+})
+
+test('goal 恢复仍消耗独立重复预算, 恢复失败不回退普通续写', async () => {
+  for (const failure of [false, true]) {
+    const h = harness({ repeatMaxContinuations: 1 })
+    const service = mountGoal(h)
+    if (failure) service.failResume = true
+    for (const turn of failure ? [1] : [1, 2]) {
+      h.start(turn)
+      h.chunk('text-delta', 'x'.repeat(300))
+      h.end(turn)
+      await setImmediate()
+    }
+    assert.equal(service.resumes, failure ? 0 : 1)
+    assert.equal(h.delivered.length, 0)
+    assert.equal(h.injected.length, failure ? 0 : 1)
+    await h.ctx.fiber.dispose()
+  }
+})
+
+/** 模拟已核对的宿主取消边界, 其正式 goal 服务使用 CAS 版本. */
+function mountGoal(h: ReturnType<typeof harness>, initial = {}, goalRound = true) {
+  const service = {
+    value: { id: 'goal-test', revision: 1, phase: 'active', activation: 'armed', roundsStarted: 1, maxGoalRounds: 8, ...initial },
+    resumes: 0,
+    failResume: false,
+    get: (_agent: any) => ({ ...service.value }),
+    resume: (_agent: any, ref: any) => {
+      if (service.failResume) throw new Error('resume failed')
+      assert.deepEqual(ref, { id: service.value.id, revision: service.value.revision })
+      service.resumes += 1
+      service.change('resume')
+      return { ...service.value }
+    },
+    change: (operation: string) => {
+      service.value.revision += 1
+      if (operation === 'pause') service.value.phase = 'paused'
+      if (operation === 'complete') service.value.phase = 'complete'
+      if (operation === 'resume') service.value.phase = 'active'
+      service.value.activation = operation === 'resume' ? 'armed' : 'disarmed'
+      h.ctx.emit(agentCarrier(h.agent), 'goal/changed' as any, {
+        agent: h.agent, change: { operation, goal: { ...service.value } },
+      })
+    },
+  }
+  h.ctx.provide('goals', service)
+  h.ctx.on('agent/status', ({ status }) => {
+    if (status !== 'idle' || service.value.activation !== 'armed') return
+    if (goalRound) service.change('pause')
+    else service.value.activation = 'disarmed'
+  })
+  return service
 }
 
 test('思维链和正文均中止生成, 保留 inbox, 双路径只投递一次', async () => {
