@@ -22,13 +22,20 @@ interface SettingsFormsLike {
 /**
  * 声明本插件的表单呈现方式并接上实时同步.
  *
- * volatile 字段的写入不重挂插件, 只在原地更新引用, 所以这里必须监听
- * `loader/volatile-update` 主动作废缓存; 光靠激活时读一次会让配置永远停在旧值.
+ * volatile 字段的写入不重挂插件, 更新事件只发送给配置所属的 fiber.
+ * 在所属 ctx 上同步配置, settings 的注入子上下文只负责表单呈现.
  * @param ctx - 插件上下文.
  * @param live - 生效配置的读取口.
  * @param config - 插件激活时 Loader 解析出的 Config (volatile 写入会原地改它).
  */
 export function installSettings(ctx: Context, live: LiveConfig, config: Partial<Config> | undefined): void {
+  live.bindScope({ get: () => config as Partial<Config> })
+  live.sync(config)
+  // Loader 按所属 fiber 过滤事件, inject 创建的子 fiber 不会收到本配置的更新.
+  ctx.on('loader/volatile-update', () => {
+    live.sync(config)
+    diag(`settings sync(volatile): ${summaryOf(live.value)}`)
+  })
   ctx.inject(['settings'], (sctx: Context) => {
     try {
       const settings = (sctx as unknown as { settings?: SettingsFormsLike }).settings
@@ -46,18 +53,6 @@ export function installSettings(ctx: Context, live: LiveConfig, config: Partial<
       } catch (error) {
         diag(`settings.configure 失败（可能已配置过同一 fiber）：${String(error)}`)
       }
-      live.bindScope({ get: () => config as Partial<Config> })
-      live.invalidate()
-      live.sync(config as Partial<Config>)
-      sctx.on('loader/volatile-update', () => {
-        live.invalidate()
-        live.sync(config as Partial<Config>)
-        const now = live.value
-        diag(
-          `settings sync(volatile): autoContinue=${now.autoContinue}`
-          + ` maxContinuations=${now.maxContinuations} enabled=${now.enabled}`,
-        )
-      })
       diag(`settings presentation configured (ns=${ENTRY_ID}) ${summaryOf(live.value)}`)
     } catch (error) {
       diag(`settings 注册失败：${String(error)}`)
