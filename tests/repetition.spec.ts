@@ -78,7 +78,7 @@ test('默认要求至少 8 次且至少 256 个字符, 两个条件同时满足'
 })
 
 test('默认关闭及配置边界收敛, Schema 拒绝非法阈值', () => {
-  assert.equal(normalizeConfig(undefined).repeatDetection, false)
+  assert.equal(normalizeConfig(undefined).repeatMode, 'off')
   const config = normalizeConfig({ repeatDetection: true, repeatMinRepeats: 200, repeatMinChars: -10 })
   assert.equal(config.repeatMinRepeats, 20)
   assert.equal(config.repeatMinChars, 64)

@@ -21,10 +21,10 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { useState, type ReactNode } from 'react'
-import { DEFAULT_REPEAT_CONTINUATION_PROMPT, LOG_FILE_DISPLAY, REPEAT_LIMITS } from '../shared.ts'
+import { DEFAULT_ERROR_CONTINUATION_PROMPT, DEFAULT_REPEAT_CONTINUATION_PROMPT, LOG_FILE_DISPLAY, REPEAT_LIMITS, type RepeatMode } from '../shared.ts'
 import type { TextFieldName } from './settings-form.ts'
 import { BackoffViz } from './backoff.tsx'
-import { CodeChips, FieldGroup, OverridesEditor, SwitchRow, TextAreaField } from './fields.tsx'
+import { CodeChips, FieldGroup, OverridesEditor, SwitchRow, SelectField, TextAreaField } from './fields.tsx'
 import type { RetryLocaleKey } from './locales.ts'
 import type { RetryCardFace } from './settings-form.ts'
 import { StatsPanel } from './stats-panel.tsx'
@@ -87,7 +87,6 @@ export function RetrySettingsCard(props: RetrySettingsCardProps): ReactNode {
       c: String(state.retryableCodes.length),
     })
     : t('statusOff')
-  const status = `${retryStatus} · ${state.autoContinue ? t('continueOn', { n: state.maxContinuationsText }) : t('continueOff')}`
 
   const logAbsolute = state.logPath
   const openLog = (): void => {
@@ -138,9 +137,10 @@ export function RetrySettingsCard(props: RetrySettingsCardProps): ReactNode {
     >
       {state.hostFresh ? null : <p className="dsh-lrs-notice">{t('hostStale')}</p>}
 
+      <FieldGroup legend={t('groupRetry')}>
       <SwitchRow
         label={t('enabled')}
-        notes={[t('enabledHint'), status]}
+        notes={[t('enabledHint'), retryStatus]}
         checked={state.enabled}
         overridden={state.overridden.enabled}
         overriddenLabel={t('overridden')}
@@ -236,10 +236,12 @@ export function RetrySettingsCard(props: RetrySettingsCardProps): ReactNode {
         />
       </FieldGroup>
 
-      {/* 自动续写与重试是两条独立通路: max-tokens 不是错误, 重试策略永远碰不到它. */}
+      </FieldGroup>
+
+      <FieldGroup legend={t('groupContinue')}>
       <SwitchRow
-        label={t('groupContinue')}
-        notes={[t('continueHint')]}
+        label={t('tokenContinue')}
+        notes={[t('continueHint'), state.autoContinue ? t('continueOn', { n: state.maxContinuationsText }) : t('continueOff')]}
         checked={state.autoContinue}
         overridden={state.overridden.autoContinue}
         overriddenLabel={t('overridden')}
@@ -264,18 +266,6 @@ export function RetrySettingsCard(props: RetrySettingsCardProps): ReactNode {
 
       {/* 只在次数为 0 时提示, 不跟着上面的开关出现/消失——那样点开关会让下面整块跳位. */}
       {state.maxContinuationsText.trim() === '0' ? <p className="dsh-lrs-hint">{t('continueZero')}</p> : null}
-
-      <SwitchRow
-        label={t('continueOnError')}
-        notes={[t('continueOnErrorHint')]}
-        checked={state.continueOnError}
-        overridden={state.overridden.continueOnError}
-        overriddenLabel={t('overridden')}
-        resetLabel={t('reset')}
-        disabled={locked}
-        onToggle={props.setContinueOnError}
-        onReset={() => { props.resetField('continueOnError') }}
-      />
 
       <TextAreaField
         id="plugin-config-llm-retry-continuation-prompt"
@@ -311,16 +301,25 @@ export function RetrySettingsCard(props: RetrySettingsCardProps): ReactNode {
         )}
       />
 
-      <SwitchRow
-        label={t('repeatDetection')}
-        notes={[t('repeatDetectionHint')]}
-        checked={state.repeatDetection}
-        overridden={state.overridden.repeatDetection}
+      </FieldGroup>
+
+      <FieldGroup legend={t('groupRepeat')}>
+      <SelectField<RepeatMode>
+        id="plugin-config-llm-retry-repeat-mode"
+        label={t('repeatMode')}
+        hint={t('repeatDetectionHint')}
+        value={state.repeatMode}
+        options={[
+          { value: 'off', label: t('repeatOff') },
+          { value: 'stop', label: t('repeatStop') },
+          { value: 'continue', label: t('repeatContinue') },
+        ]}
+        overridden={state.overridden.repeatMode}
         overriddenLabel={t('overridden')}
         resetLabel={t('reset')}
         disabled={locked}
-        onToggle={props.setRepeatDetection}
-        onReset={() => { props.resetField('repeatDetection') }}
+        onChange={props.setRepeatMode}
+        onReset={() => { props.resetField('repeatMode') }}
       />
       <div className="dsh-lrs-grid">
         {numberField(
@@ -340,6 +339,10 @@ export function RetrySettingsCard(props: RetrySettingsCardProps): ReactNode {
           'repeatMinCharsText', 'repeatMinChars',
         )}
       </div>
+      {numberField('plugin-config-llm-retry-repeat-limit', t('repeatMaxContinue'), t('recoveryLimitHint'),
+        state.repeatMaxContinuationsText, state.overridden.repeatMaxContinuations,
+        !/^\d+$/.test(state.repeatMaxContinuationsText.trim()), 'repeatMaxContinuationsText', 'repeatMaxContinuations')}
+      {state.repeatMaxContinuationsText.trim() === '0' ? <p className="dsh-lrs-hint">{t('repeatZero')}</p> : null}
       <TextAreaField
         id="plugin-config-llm-retry-repeat-prompt"
         label={t('repeatPrompt')}
@@ -353,6 +356,25 @@ export function RetrySettingsCard(props: RetrySettingsCardProps): ReactNode {
         onEdit={(text) => { props.editText('repeatContinuationPrompt', text) }}
         onReset={() => { props.resetField('repeatContinuationPrompt') }}
       />
+
+      </FieldGroup>
+
+      <FieldGroup legend={t('groupError')}>
+        <SwitchRow label={t('continueOnError')} notes={[t('continueOnErrorHint')]}
+          checked={state.errorContinue} overridden={state.overridden.errorContinue}
+          overriddenLabel={t('overridden')} resetLabel={t('reset')} disabled={locked}
+          onToggle={props.setErrorContinue} onReset={() => props.resetField('errorContinue')} />
+        {numberField('plugin-config-llm-retry-error-limit', t('errorMaxContinue'), t('recoveryLimitHint'),
+          state.errorMaxContinuationsText, state.overridden.errorMaxContinuations,
+          !/^\d+$/.test(state.errorMaxContinuationsText.trim()), 'errorMaxContinuationsText', 'errorMaxContinuations')}
+        {state.errorMaxContinuationsText.trim() === '0' ? <p className="dsh-lrs-hint">{t('continueZero')}</p> : null}
+        <TextAreaField id="plugin-config-llm-retry-error-prompt"
+          label={t('errorPrompt')} hint={t('errorPromptHint')} placeholder={DEFAULT_ERROR_CONTINUATION_PROMPT}
+          text={state.errorContinuationPrompt} overridden={state.overridden.errorContinuationPrompt}
+          overriddenLabel={t('overridden')} resetLabel={t('reset')} disabled={locked}
+          onEdit={text => props.editText('errorContinuationPrompt', text)}
+          onReset={() => props.resetField('errorContinuationPrompt')} />
+      </FieldGroup>
 
       <FieldGroup legend={t('groupStats')}>
         <StatsPanel logPath={logAbsolute} t={t} />

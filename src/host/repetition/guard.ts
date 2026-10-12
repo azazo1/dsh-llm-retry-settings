@@ -77,7 +77,7 @@ export class RepetitionGuard {
     }
     const config = this.live.current()
     const state = this.attempts.get(agent)
-    if (!config.repeatDetection) {
+    if (config.repeatMode === 'off') {
       state?.blocks.clear()
       return
     }

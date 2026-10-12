@@ -1,7 +1,7 @@
 {
   "name": "dsh-llm-retry-settings",
   "version": "0.2.0",
-  "description": "DSH 插件：LLM 自动重试配置页——重试次数/退避/抖动与 25 个错误码可勾选（也能自己输入），可按 provider/model 单独设策略、回答被输出 token 上限截断时自动续写且提示词可改，内置重试观测面板，改完实时生效。",
+  "description": "DSH 的 LLM 请求重试与自动恢复设置页. 请求重试, token 上限续写, 重复输出处理及最终失败恢复独立控制, 自带配置 UI 与观测面板.",
   "keywords": ["dsh", "dsh-plugin", "llm", "retry", "auto-retry", "auto-continue", "max-tokens", "settings", "deepseek"],
   "type": "module",
   "main": "lib/index.js",

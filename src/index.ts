@@ -5,7 +5,7 @@
  *  1. 把配置挂进内核的设置表单 (`settings.configure`), 命名空间 = profile 条目 id.
  *  2. `agent/request-error` 上以 prepend 改写 retryPolicy: 次数/退避/抖动覆盖,
  *     额外 retryableCodes 与 provider 内置列表取并集. `enabled=false` 时完全旁路.
- *  3. `autoContinue=true` 时监听 `turn/end`, 输出被 token 上限截断就补一轮续写.
+ *  3. 根据独立策略恢复 token 上限, 重复中止和最终可恢复错误.
  *  4. 两条只读观测路由, 经 `/api` 通道暴露内存计数与 host.log 尾部.
  *
  * 配置页在浏览器半区 (src/client), 注册到插件管理页本 bundle 的详情页上.

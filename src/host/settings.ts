@@ -10,13 +10,16 @@
 import type { Context } from '@deepseek-ai/cordis'
 // 类型侧导入: 它把 `loader/volatile-update` 并进 cordis 的 Events 表, 运行时不需要这个包.
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import { ENTRY_ID, type Config } from '../shared.ts'
+import { CONFIG_VERSION, ENTRY_ID, type Config } from '../shared.ts'
+import { migrationPatch } from '../config-migration.ts'
 import { diag, summaryOf } from './diag.ts'
 import type { LiveConfig } from './live-config.ts'
 
 /** settings 服务 (SettingsForms) 的最小结构类型. */
 interface SettingsFormsLike {
   configure(presentation: { auto?: boolean }, owner?: unknown): () => void
+  describe?: () => { ns: string; revision: number; value: Partial<Config> }[]
+  mutate?: (ns: string, ops: { op: 'set' | 'unset'; path: string[]; value?: unknown }[], revision: number) => Promise<void>
 }
 
 /**
@@ -53,6 +56,31 @@ export function installSettings(ctx: Context, live: LiveConfig, config: Partial<
       } catch (error) {
         diag(`settings.configure 失败（可能已配置过同一 fiber）：${String(error)}`)
       }
+      // 等 Loader 稳定后通过正式设置服务写回迁移, 不直接修改 profile 文件.
+      // expectedRevision 防止迁移覆盖同时发生的 user 编辑.
+      let disposed = false
+      sctx.effect(() => () => { disposed = true }, 'dsh-llm-retry-settings: migration lifetime')
+      void (async () => {
+        try {
+          await ctx.loader.await()
+          if (disposed || !settings.describe || !settings.mutate) return
+          const id = ctx.fiber.entry?.options.id
+          const descriptor = settings.describe().find(row => row.ns === id)
+          if (!descriptor || (descriptor.value.configVersion ?? 1) >= CONFIG_VERSION) return
+          const ops = Object.entries(migrationPatch(descriptor.value))
+            .filter(([, value]) => value !== undefined)
+            .map(([key, value]) => ({ op: 'set' as const, path: [key], value }))
+          await settings.mutate(descriptor.ns, [
+            ...ops,
+            { op: 'unset', path: ['repeatDetection'] },
+            { op: 'unset', path: ['continueOnError'] },
+          ], descriptor.revision)
+          diag(`配置迁移完成 version=${CONFIG_VERSION} ns=${descriptor.ns}`)
+        } catch (error) {
+          diag(`配置迁移写回失败, 继续使用迁移后的有效配置: ${String(error)}`)
+          ctx.logger.warn('[dsh-llm-retry-settings] 配置迁移写回失败', error)
+        }
+      })()
       diag(`settings presentation configured (ns=${ENTRY_ID}) ${summaryOf(live.value)}`)
     } catch (error) {
       diag(`settings 注册失败：${String(error)}`)

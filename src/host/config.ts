@@ -9,7 +9,10 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
+import { migrateConfig, unvol } from '../config-migration.ts'
+export { unvol } from '../config-migration.ts'
 import {
+  CONFIG_VERSION,
   DEFAULTS,
   OVERRIDE_INHERIT,
   OVERRIDE_MAX_ROWS,
@@ -51,8 +54,15 @@ export const Config = z.object({
   autoContinue: z.boolean().default(DEFAULTS.autoContinue).volatile(),
   maxContinuations: z.number().step(1).min(0).default(DEFAULTS.maxContinuations).volatile(),
   continuationPrompt: z.string().default(DEFAULTS.continuationPrompt).volatile(),
-  continueOnError: z.boolean().default(DEFAULTS.continueOnError).volatile(),
-  repeatDetection: z.boolean().default(DEFAULTS.repeatDetection).volatile(),
+  // 旧格式为 1, 迁移后写回 2. 新字段无 Schema 默认, 避免遮住旧配置.
+  configVersion: z.number().step(1).min(1).max(CONFIG_VERSION).default(1).hidden().volatile(),
+  errorContinue: z.boolean().volatile(),
+  errorMaxContinuations: z.number().step(1).min(0).volatile(),
+  errorContinuationPrompt: z.string().volatile(),
+  repeatMode: z.union(['off', 'stop', 'continue']).volatile(),
+  repeatMaxContinuations: z.number().step(1).min(0).volatile(),
+  continueOnError: z.boolean().hidden().volatile(),
+  repeatDetection: z.boolean().hidden().volatile(),
   repeatMinRepeats: z.number().step(1).min(REPEAT_LIMITS.minRepeats).max(REPEAT_LIMITS.maxRepeats).default(DEFAULTS.repeatMinRepeats).volatile(),
   repeatMinChars: z.number().step(1).min(REPEAT_LIMITS.minChars).max(REPEAT_LIMITS.maxChars).default(DEFAULTS.repeatMinChars).volatile(),
   repeatContinuationPrompt: z.string().default(DEFAULTS.repeatContinuationPrompt).volatile(),
@@ -71,18 +81,6 @@ export const Config = z.object({
     .volatile(),
   logPath: z.string().default(LOG_FILE).volatile(),
 })
-
-/** 0.1.7 的 volatile 字段解析结果是 cosmokit 的引用对象, 取值要 `.get()`. */
-const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write')
-
-/** 解 volatile 引用对象; 普通值原样返回. */
-export function unvol<T>(value: T): T {
-  if (value !== null && typeof value === 'object' && VOLATILE_WRITE in (value as object)) {
-    const get = (value as { get?: () => unknown }).get
-    if (typeof get === 'function') return get() as T
-  }
-  return value
-}
 
 /** 只留非空字符串. */
 const normCodes = (value: unknown): string[] =>
@@ -136,6 +134,7 @@ export const DEFAULTS_CONFIG: ConfigShape = { ...DEFAULTS, logPath: LOG_FILE }
  * 越界夹紧, 类型不符回退, 非法码过滤, 退避下限封顶都在此统一完成.
  */
 export function coerceConfig(raw: Partial<ConfigShape> | undefined | null, fallback: ConfigShape): ConfigShape {
+  raw = migrateConfig(raw)
   const codes = unvol(raw?.retryableCodes)
   const prompt = unvol(raw?.continuationPrompt)
   const repeatPrompt = unvol(raw?.repeatContinuationPrompt)
@@ -151,8 +150,12 @@ export function coerceConfig(raw: Partial<ConfigShape> | undefined | null, fallb
     autoContinue: asBool(raw?.autoContinue) ?? fallback.autoContinue,
     maxContinuations: asInt(raw?.maxContinuations, 0) ?? fallback.maxContinuations,
     continuationPrompt: typeof prompt === 'string' ? prompt : fallback.continuationPrompt,
-    continueOnError: asBool(raw?.continueOnError) ?? fallback.continueOnError,
-    repeatDetection: asBool(raw?.repeatDetection) ?? fallback.repeatDetection,
+    configVersion: raw.configVersion ?? fallback.configVersion,
+    errorContinue: asBool(raw.errorContinue) ?? fallback.errorContinue,
+    errorMaxContinuations: asInt(raw.errorMaxContinuations, 0) ?? fallback.errorMaxContinuations,
+    errorContinuationPrompt: typeof raw.errorContinuationPrompt === 'string' ? raw.errorContinuationPrompt : fallback.errorContinuationPrompt,
+    repeatMode: ['off', 'stop', 'continue'].includes(raw.repeatMode ?? '') ? raw.repeatMode! : fallback.repeatMode,
+    repeatMaxContinuations: asInt(raw.repeatMaxContinuations, 0) ?? fallback.repeatMaxContinuations,
     repeatMinRepeats: Math.min(REPEAT_LIMITS.maxRepeats, asInt(raw?.repeatMinRepeats, REPEAT_LIMITS.minRepeats) ?? fallback.repeatMinRepeats),
     repeatMinChars: Math.min(REPEAT_LIMITS.maxChars, asInt(raw?.repeatMinChars, REPEAT_LIMITS.minChars) ?? fallback.repeatMinChars),
     repeatContinuationPrompt: typeof repeatPrompt === 'string' ? repeatPrompt : fallback.repeatContinuationPrompt,

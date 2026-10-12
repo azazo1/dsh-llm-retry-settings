@@ -10,6 +10,20 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 
 /** 本插件的文案键. */
 export type RetryLocaleKey =
+  | 'groupRetry'
+  | 'tokenContinue'
+  | 'groupRepeat'
+  | 'repeatMode'
+  | 'repeatOff'
+  | 'repeatStop'
+  | 'repeatContinue'
+  | 'repeatMaxContinue'
+  | 'repeatZero'
+  | 'groupError'
+  | 'errorMaxContinue'
+  | 'errorPrompt'
+  | 'errorPromptHint'
+  | 'recoveryLimitHint'
   | 'description'
   | 'enabled'
   | 'enabledHint'
@@ -172,8 +186,22 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 /** 中文文案. */
 export const zh: Record<RetryLocaleKey, string> = {
+  groupRetry: '请求失败重试',
+  tokenContinue: '达到输出 token 上限后自动继续',
+  groupRepeat: '重复输出处理',
+  repeatMode: '处理模式',
+  repeatOff: '关闭',
+  repeatStop: '仅中止',
+  repeatContinue: '中止并自动继续',
+  repeatMaxContinue: '重复中止后最多自动继续',
+  repeatZero: '次数为 0: 仍检测并中止重复输出, 不发送继续.',
+  groupError: '请求最终失败恢复',
+  errorMaxContinue: '最终失败后最多自动继续',
+  errorPrompt: '错误恢复提示词',
+  errorPromptHint: '仅用于最终可恢复错误结束后的新消息, 留空使用错误专用文案.',
+  recoveryLimitHint: '仅累计本组在同一条恢复链里发送的次数, 切换原因不重置. 模型正常完成或 user 发言后重置. 0 = 不发送继续.',
   repeatDetection: '重复输出自动截断',
-  repeatDetectionHint: '实时检测思维链和正文中的连续精确重复, 不检测工具参数. 中止后保留已有输出和排队消息. 要自动发送继续, 同时打开自动续写; 共用续写次数上限. 默认关闭.',
+  repeatDetectionHint: '分别检测思考和正文的连续精确重复, 不检测工具参数. 仅中止保留输出和排队消息; 中止并自动继续使用本组次数和提示词, 不依赖 token 续写开关. 默认关闭.',
   repeatMinRepeats: '最少连续重复次数',
   repeatMinRepeatsHint: '3-20 次, 默认 8 次. 必须同时达到字符数阈值.',
   repeatMinChars: '最少重复字符数',
@@ -182,9 +210,9 @@ export const zh: Record<RetryLocaleKey, string> = {
   repeatPromptHint: '留空使用专用文案, 要求停止重复并从有效内容处继续, 不沿用 token 上限提示词.',
   statsRepeats: '重复截断',
   statsKindRepeat: '重复截断',
-  description: '模型请求失败时的自动恢复策略，以及输出被 token 上限截断时的自动续写。开启重试后以本页值为准覆盖各 provider 的重试次数与退避时间。',
-  enabled: '覆盖重试策略',
-  enabledHint: '打开并保存后，本插件才覆盖各 provider 的重试次数与退避时间；关闭时完全旁路，不改任何东西。',
+  description: '请求重试, token 上限续写, 重复输出处理和最终失败恢复独立控制. 保存后实时生效, 页面底部提供运行观测与日志.',
+  enabled: '覆盖请求重试策略',
+  enabledHint: '打开并保存后覆盖各 provider 的请求重试次数与退避策略, 关闭时沿用 provider 策略. 只控制本组, 不影响三类自动继续.',
   statusOff: '沿用各 provider 自带的重试策略',
   statusOn: '最多重试 {n} 次 · 退避 {init}ms→{max}ms · 抖动 {j} · 补充 {c} 个错误码',
   continueOn: '截断自动续写 ≤{n} 次',
@@ -247,15 +275,15 @@ export const zh: Record<RetryLocaleKey, string> = {
   codeMissingCredential: '缺少 API Key；先去模型页配置',
   codeAborted: '调用方主动取消；绝不应重试',
   codeUnknown: '非 LlmError 的通用兜底；勾选=广撒网',
-  groupContinue: '输出截断自动续写',
-  continueHint: '回答被输出 token 上限截断时（宿主会显示「已达到输出 token 上限」），自动替你发一条「继续」，模型接着上文往下写。这不是请求失败，上面的重试策略管不到它；两者互不影响。',
+  groupContinue: 'token 上限续写',
+  continueHint: '只处理输出 token 上限截断, 自动发一条继续消息. 与请求重试, 重复输出处理和错误恢复均独立.',
   logTitle: '排错日志',
   logOpen: '打开日志',
   logCopied: '已复制日志路径，粘贴到资源管理器地址栏即可。',
   logManual: '当前环境拿不到日志路径也复制不了，请手动访问上面的路径。',
   continueZero: '次数为 0：不会补写任何一轮。',
-  fieldMaxContinue: '最多连续续写',
-  fieldMaxContinueHint: '同一次截断后连续补写的次数上限；模型正常说完或你重新发言即重新计数',
+  fieldMaxContinue: 'token 上限后最多自动继续',
+  fieldMaxContinueHint: '仅累计 token 上限续写, 切换恢复原因不重置. 正常完成或 user 发言后重置. 0 = 不续写.',
   fieldPrompt: '续写提示词',
   fieldPromptHint: '截断后自动发给模型的文案。留空用内置默认文案（「请从中断处直接继续输出…」）。',
   fieldPromptPlaceholder: '留空 = 使用内置默认文案',
@@ -272,8 +300,8 @@ export const zh: Record<RetryLocaleKey, string> = {
   promptTplAnswerText: '上一条回复被输出长度上限截断。请先直接给出最终答案，再补最关键的论证；不要重复已经输出的内容。',
   promptTplThink: '压缩思考',
   promptTplThinkText: '上一条回复在思考阶段就达到输出上限。请压缩推理：直接给出最终答案，只在必要处给一行理由，不要展开长篇思考。',
-  continueOnError: '重试彻底失败后也续写',
-  continueOnErrorHint: '请求把重试次数用尽后，若结束原因是瞬时错误（超时 / 传输 / 服务端 / 流中断 / 空响应），也补一轮续写；确定性错误（参数、内容、凭证）不补。',
+  continueOnError: '可恢复错误结束后自动继续',
+  continueOnErrorHint: '请求最终因超时, 传输, 服务端, 流中断或空响应等瞬时错误结束后, 发送新消息继续任务. 这不是同一次请求内的重试, 不依赖重试覆盖或 token 续写开关. 参数, 内容和凭证等确定性错误不继续.',
   groupBackoff: '退避与预算',
   backoffEmpty: '重试次数为 0：不会产生任何等待。',
   backoffBudget: '预算：{n} 次重试累计等待 {best}~{worst}（含抖动区间）',
@@ -313,7 +341,7 @@ export const zh: Record<RetryLocaleKey, string> = {
   statsLogTail: '查看日志尾部',
   statsLogHide: '收起日志',
   statsLogEmpty: '（暂无日志）',
-  hostStale: '宿主半边还是旧版（内核未重启）：覆盖规则 / 续写增强 / 观测面板可以看，但保存不生效、观测路由会 404。',
+  hostStale: '宿主尚未加载新版配置格式. 请更新并重新加载插件或重启 DSH, 仅刷新页面不会更新宿主逻辑.',
   formUnavailable: '宿主没有把本插件的配置暴露给这个客户端（条目未激活或未组合）。',
   formReadOnly: '当前配置为只读，改动不会落盘。',
   formSaveFailed: '保存失败 ✗（重试或刷新页面；宿主日志见 settings-rejected）',
@@ -326,8 +354,22 @@ export const zh: Record<RetryLocaleKey, string> = {
 
 /** 英文文案. */
 export const en: Record<RetryLocaleKey, string> = {
+  groupRetry: 'Request retries',
+  tokenContinue: 'Continue after the output-token limit',
+  groupRepeat: 'Repetitive output',
+  repeatMode: 'Action',
+  repeatOff: 'Off',
+  repeatStop: 'Stop only',
+  repeatContinue: 'Stop and continue',
+  repeatMaxContinue: 'Maximum repetition follow-ups',
+  repeatZero: 'A cap of 0 still detects and stops repetition, but sends no follow-up.',
+  groupError: 'Final request failure recovery',
+  errorMaxContinue: 'Maximum error follow-ups',
+  errorPrompt: 'Error recovery prompt',
+  errorPromptHint: 'Used only for a new message after a final recoverable error. Empty uses the error-specific prompt.',
+  recoveryLimitHint: 'Counts only this group in the same recovery chain. Changing reasons does not reset it. Normal completion or user input resets all counts. 0 = no follow-ups.',
   repeatDetection: 'Stop repetitive output',
-  repeatDetectionHint: 'Detect exact consecutive repetition in reasoning and text, not tool arguments. Stop generation while preserving output and queued messages. Enable auto-continue as well to send a follow-up, using its shared cap. Off by default.',
+  repeatDetectionHint: 'Detect exact consecutive repetition in reasoning and text, not tool arguments. Stop only preserves output and queued messages. Stop and continue uses this group\'s own cap and prompt, independent of token continuation. Off by default.',
   repeatMinRepeats: 'Minimum consecutive repetitions',
   repeatMinRepeatsHint: '3-20 repetitions, default 8. The character threshold must also be met.',
   repeatMinChars: 'Minimum repeated characters',
@@ -336,9 +378,9 @@ export const en: Record<RetryLocaleKey, string> = {
   repeatPromptHint: 'Empty uses a dedicated prompt asking the model to stop repeating and continue useful output, not the token-limit prompt.',
   statsRepeats: 'repeat stops',
   statsKindRepeat: 'repeat stop',
-  description: 'Automatic recovery for failed model requests, plus auto-continue when a reply is cut off by the output token limit. While enabled, this page overrides each provider\'s retry count and backoff.',
+  description: 'Independent request retries, token-limit continuation, repetition handling, and final-error recovery. Changes apply on save, with observation and logs at the bottom.',
   enabled: 'Override retry policy',
-  enabledHint: 'Once on and saved, this plugin overrides every provider\'s retry count and backoff; while off it changes nothing at all.',
+  enabledHint: 'Overrides provider request retry counts and backoff after saving. When off, provider policies remain unchanged. Controls only this group, not any follow-up recovery.',
   statusOff: 'Using each provider\'s built-in retry policy',
   statusOn: 'up to {n} retries · backoff {init}ms→{max}ms · jitter {j} · {c} extra codes',
   continueOn: 'auto-continue ≤{n}',
@@ -401,15 +443,15 @@ export const en: Record<RetryLocaleKey, string> = {
   codeMissingCredential: 'No API key configured; set it on the Models page first',
   codeAborted: 'Cancelled by the caller; never retry',
   codeUnknown: 'Generic fallback for failures that are not LlmError; picking it means casting a wide net',
-  groupContinue: 'Auto-continue on truncation',
-  continueHint: 'When a reply is cut off by the output token limit (the host shows "Output token limit reached"), a "continue" turn is sent automatically so the model resumes. This is not a request failure, so the retry policy above never sees it; the two are independent.',
+  groupContinue: 'Output-token continuation',
+  continueHint: 'Sends a follow-up only after the output-token limit. Independent of request retries, repetition handling, and error recovery.',
   logTitle: 'Troubleshooting log',
   logOpen: 'Open log',
   logCopied: 'Log path copied — paste it into Explorer\'s address bar.',
   logManual: 'This environment exposes neither the log path nor the clipboard; open the path above manually.',
   continueZero: 'Zero rounds: nothing will be sent.',
-  fieldMaxContinue: 'Max consecutive continuations',
-  fieldMaxContinueHint: 'Upper bound per truncation chain; resets once the model finishes or you speak again',
+  fieldMaxContinue: 'Maximum token-limit follow-ups',
+  fieldMaxContinueHint: 'Counts only token-limit follow-ups in the same recovery chain. Changing reasons does not reset it. Normal completion or user input resets it.',
   fieldPrompt: 'Continuation prompt',
   fieldPromptHint: 'The text sent to the model after a truncation. Leave empty for the built-in default ("resume from where it stopped…").',
   fieldPromptPlaceholder: 'Empty = built-in default',
@@ -426,8 +468,8 @@ export const en: Record<RetryLocaleKey, string> = {
   promptTplAnswerText: 'The previous reply was cut off by the output length limit. Give the final answer first, then only the most essential argument; do not repeat what you already wrote.',
   promptTplThink: 'Compress thinking',
   promptTplThinkText: 'The previous reply hit the output limit while still thinking. Compress your reasoning: give the final answer directly, with at most one line of justification per step.',
-  continueOnError: 'Continue after retries are exhausted',
-  continueOnErrorHint: 'Once the request has used up all retries, a transient failure (timeout / transport / server / stream break / empty response) also gets one continuation round; deterministic failures (params, content, credentials) do not.',
+  continueOnError: 'Continue after a final recoverable error',
+  continueOnErrorHint: 'Sends a new message after a final transient error, such as timeout, transport, server failure, or interrupted/empty output. This is not a retry within the request. Independent of retry overrides and token continuation. Deterministic parameter, content, or credential errors never trigger it.',
   groupBackoff: 'Backoff & budget',
   backoffEmpty: 'Zero retries: no waiting at all.',
   backoffBudget: 'Budget: {n} retries wait {best}–{worst} in total (jitter range)',
@@ -467,7 +509,7 @@ export const en: Record<RetryLocaleKey, string> = {
   statsLogTail: 'Show log tail',
   statsLogHide: 'Hide log',
   statsLogEmpty: '(no log yet)',
-  hostStale: 'The host half is still the old build (kernel not restarted): the override rules, continuation extras and observation panel render, but saving has no effect and the stats route returns 404.',
+  hostStale: 'The host has not loaded the new configuration format. Update and reload the plugin or restart DSH. Refreshing the page does not update host logic.',
   formUnavailable: 'The host does not expose this plugin\'s configuration to this client (entry inactive or not composed).',
   formReadOnly: 'This configuration is read-only; edits will not be stored.',
   formSaveFailed: 'Save failed ✗ (retry or refresh; host log: settings-rejected)',

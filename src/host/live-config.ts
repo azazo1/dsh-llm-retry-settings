@@ -29,7 +29,7 @@ export class LiveConfig {
    */
   constructor(config: Partial<Config> | undefined) {
     this.live = normalizeConfig(config)
-    setDiagActive(this.live.enabled || this.live.autoContinue || this.live.repeatDetection)
+    setDiagActive(this.live.enabled || this.live.autoContinue || this.live.errorContinue || this.live.repeatMode !== 'off')
   }
 
   /** 最近一次同步后的值 (不触发重读). */
@@ -78,6 +78,6 @@ export class LiveConfig {
       if (Object.hasOwn(next, key)) this.lastValues.set(key, unvol(next[key as keyof Config]))
     }
     // 任一功能开启时记录诊断, 全部关闭时不写盘.
-    setDiagActive(this.live.enabled || this.live.autoContinue || this.live.repeatDetection)
+    setDiagActive(this.live.enabled || this.live.autoContinue || this.live.errorContinue || this.live.repeatMode !== 'off')
   }
 }

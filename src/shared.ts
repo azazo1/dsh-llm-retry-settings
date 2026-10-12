@@ -68,12 +68,14 @@ export const REPEAT_LIMITS = {
   maxChars: 8192,
 }
 
-/**
- * 全部默认值.
- *
- * 唯一事实源: 宿主 schema 的 default, 宿主归一化的兜底与客户端卡片的初值都取这里.
- * `logPath` 不在其中——它是宿主按 `DSH_HOME` 解析出来的只读值, 不是可配置默认.
- */
+/** 配置格式版本与重复输出模式. */
+export const CONFIG_VERSION = 2
+export type RepeatMode = 'off' | 'stop' | 'continue'
+
+export const DEFAULT_ERROR_CONTINUATION_PROMPT =
+  '上一轮请求因可恢复的临时错误结束. 请从已有有效内容处继续完成任务, 不要重复已经完成的操作. 若没有有效输出, 请直接完成原任务.'
+
+/** 全部默认值的唯一事实源, Schema, 迁移, 归一化及客户端共同使用. */
 export const DEFAULTS = {
   enabled: false,
   maxRetries: 2,
@@ -84,10 +86,12 @@ export const DEFAULTS = {
   autoContinue: false,
   maxContinuations: 2,
   continuationPrompt: '',
-  /** 瞬时错误 (重试彻底失败) 也自动续写一轮; 默认关闭. */
-  continueOnError: false,
-  /** 重复检测默认关闭, 启用后截断独立生效, 续写仍由 autoContinue 控制. */
-  repeatDetection: false,
+  configVersion: CONFIG_VERSION,
+  errorContinue: false,
+  errorMaxContinuations: 2,
+  errorContinuationPrompt: '',
+  repeatMode: 'off' as RepeatMode,
+  repeatMaxContinuations: 2,
   repeatMinRepeats: 8,
   repeatMinChars: 256,
   repeatContinuationPrompt: '',
@@ -106,14 +110,22 @@ export interface Config {
   retryableCodes: string[]
   /** 输出被 token 上限截断时自动补一轮续写. */
   autoContinue: boolean
-  /** 单个会话内连续自动续写的次数上限 (0 = 永不续写). */
+  /** token 上限自动续写在同一恢复链内的次数上限, 0 表示不发送. */
   maxContinuations: number
   /** 自动续写发送给模型的提示词; 空字符串表示使用 {@link DEFAULT_CONTINUATION_PROMPT}. */
   continuationPrompt: string
-  /** 会话因瞬时错误结束时也自动续写一轮 (确定性错误不续写). */
-  continueOnError: boolean
-  /** 实时检测思维链和正文的连续精确重复, 中止当前回合但保留用户排队输入. */
-  repeatDetection: boolean
+  /** 配置格式版本, 与插件发布版本无关. */
+  configVersion: number
+  /** 最终可恢复错误结束后的独立恢复开关. */
+  errorContinue: boolean
+  errorMaxContinuations: number
+  errorContinuationPrompt: string
+  /** 关闭检测, 仅中止, 或中止并自动继续. */
+  repeatMode: RepeatMode
+  repeatMaxContinuations: number
+  /** 仅供旧配置迁移, 新配置不写入. */
+  continueOnError?: boolean
+  repeatDetection?: boolean
   /** 同时满足次数与字符数阈值才中止. */
   repeatMinRepeats: number
   repeatMinChars: number

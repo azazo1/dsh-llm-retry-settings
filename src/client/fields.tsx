@@ -108,6 +108,32 @@ export function SwitchRow(props: {
   )
 }
 
+/** 单选偏好字段, 与数字字段共用覆盖和恢复默认布局. */
+export function SelectField<T extends string>(props: {
+  id: string
+  label: string
+  hint: string
+  value: T
+  options: readonly { value: T; label: string }[]
+  overridden: boolean
+  overriddenLabel: string
+  resetLabel: string
+  disabled: boolean
+  onChange: (value: T) => void
+  onReset: () => void
+}): ReactNode {
+  return (
+    <FieldRow id={props.id} label={props.label} hint={props.hint} trailing={
+      <OverrideTrailing {...props} />
+    }>
+      <select id={props.id} className="dsh-lrs-select" value={props.value} disabled={props.disabled}
+        onChange={event => props.onChange(event.target.value as T)}>
+        {props.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+      </select>
+    </FieldRow>
+  )
+}
+
 /**
  * 一组相关控件.
  *

@@ -1,185 +1,77 @@
 # dsh-llm-retry-settings
 
-A configuration page for the DSH LLM auto-retry engine (`@deepseek-ai/dsh-llm-retry`). Tune the retry count and backoff from the plugin's own page in the **Plugins** manager; changes take effect immediately. Since 0.1.7 it can also **auto-continue a reply that was cut off by the output-token limit**; since 0.1.9 both the extra error codes and the continuation prompt are yours to write.
+DSH 的 LLM 请求重试与自动恢复设置页. 在插件管理页编辑, 保存后实时生效. 请求重试, token 上限续写, 重复输出处理和最终失败恢复独立控制.
 
-[中文说明](./README.zh-CN.md)
+## 四组设置
 
-## Features
+| 设置组 | 主控项 | 参数 |
+| --- | --- | --- |
+| 请求失败重试 | 覆盖请求重试策略 | 重试次数, 退避, 抖动, 补充错误码, provider/model 覆盖 |
+| token 上限续写 | 达到输出 token 上限后自动继续 | 次数上限, token 专用提示词 |
+| 重复输出处理 | 关闭 / 仅中止 / 中止并自动继续 | 重复次数与字符阈值, 次数上限, 重复专用提示词 |
+| 请求最终失败恢复 | 可恢复错误结束后自动继续 | 次数上限, 错误专用提示词 |
 
-- **Includes the configuration UI** (client bundle `lib/client.js`): a card on this bundle's page in the Plugins manager — no separate UI package needed.
-- **Adapted** to kernel **0.2.0-rc.1**: the dsh peer and dev ranges move to `>=0.2.0-rc.1 <0.3.0`; no kernel-facing API change was needed.
-- **Adapted** to kernel **0.1.7-rc.2**: the page moved from a standalone Settings section to the Plugins manager's `plugins.bundle.config` slot (keyed by package name), the form frame is the official `SettingsForm`, controls reuse the official `ui-primitives` wherever one exists, and the 0.1.6 dual-version compatibility layers are gone.
-- **Fixed** — the two observation routes (`stats` / `log`) now register through `connection.fetch.register` under the `/api` channel. They used to be exact routes on `webServer`, outside the `/api` prefix, so they never passed the kernel's Host/Origin fence or the browser session cookie check: any local process could read them and DNS rebinding went straight through. Authentication is now the `/api` prefix's admission, which the plugin cannot forget to call.
-- **Fixed** — controls no longer jump on click. The error-code chips used to float picked codes to the front of their group, so clicking one moved it to the group's head or tail and dragged its neighbours along; the order is now the catalogue order and a click only changes the fill. Each group title shows its picked count (0 included) and the Custom group is always rendered, so neither the title row nor anything below it shifts with the selection.
-- Overrides `maxRetries`, `initialDelayMs`, `maxDelayMs`, and `jitterRatio` on the `agent/request-error` retry policy.
-- **New in 0.1.12** — auto-continue failed on session format v4: message sources must now be producer-owned, so the continuation carries `source.kind = "plugin:dsh-llm-retry"` instead of the retired `{kind:"plugin"}` wrapper; the "continuation landed" line in host.log is detected again.
-- **New in 0.1.11** — compatible with the new kernel **0.1.7-alpha.1** (the settings API moved to `SettingsForms`: volatile form fields, live config sync via `loader/volatile-update`, the card reads/writes through `remote.settings`).
-- **New in 0.1.11** — smoother settings-card scrolling; bug fixes.
-- **New in 0.1.10** — a read-only observation panel at the bottom of the card: retried failures, auto-continues, cap hits and skipped rounds, broken down by error code and provider/model, with the live session models (so you can copy the exact model id into an override) and a log-tail viewer.
-- **New in 0.1.10** — per-provider/model overrides: first matching rule wins, `*` wildcards, empty numbers inherit the global values.
-- **New in 0.1.10** — backoff curve with a wait budget, a "continue after retries are exhausted" switch (transient errors only), prompt templates, and a zh/en UI that follows the kernel locale.
-- **New in 0.1.9** — add your own error codes straight from the card (the `自定义` group): type a code a provider throws that is not in the known list (e.g. `MY_PROVIDER_BUSY`) and press **添加**. Input is upper-cased and validated (`A-Z 0-9 _ - .`), duplicates and blanks are rejected with an inline hint, and the code reaches `retryableCodes` unchanged.
-- **New in 0.1.9** — the auto-continue prompt is editable (`continuationPrompt`). Leave it empty to use the built-in wording, or write your own line for relays/models that need different phrasing.
-- **New in 0.1.8** — auto-continue now actually fires. Two host-side timing traps: `session/event` is dispatched *inside* `Session.append`, so queueing the follow-up straight from the listener died on `session append cannot reenter while another append is being published`; once that was fixed, waking the agent at that moment turned out to be silently dropped by the driver (`wakeDriver` only latches in maintenance/abort), so the message sat in the queue forever. The plugin now waits for `agent.whenIdle()` and re-checks (new turn started / you sent a message / session disposed) before delivering.
-- **New in 0.1.8** — the host half writes a low-frequency decision log to `~/.dsh/logs/dsh-llm-retry-settings/host.log` (capped at 256 KB) and the card points at it. See [Troubleshooting](#troubleshooting).
-- **New in 0.1.7** — error-code list re-audited against the current host build: added `PI_AI_NOT_WARMED` (adapter warm-up race; a delayed retry usually succeeds) plus three amber "retrying will not help" codes (`UNKNOWN_MODEL`, `UNSUPPORTED_OPTION`, `REQUEST_EXTENSION`). Also clarified `TIMEOUT`: a stalled SSE stream (stream-idle watchdog) is reported as `TIMEOUT` — there is no separate code for it, so the host default retry list already covers hangs.
-- **New in 0.1.7** — **auto-continue on output truncation** (`autoContinue`, off by default). Hitting the output-token ceiling is *not* a request failure — the call returns successfully with `finish = max-tokens` — so no retry policy can ever cover it. When enabled, the plugin watches `turn/end` and queues one follow-up continuation turn per truncation, at most `maxContinuations` times in a row (the counter resets when the model finishes normally or you send a new message).
-- **New in 0.1.7** — the error-code chips are grouped into six categories ordered by "will retrying help": transient → rate limit & quota → request & parameters → content & capability → credentials → abort & fallback. Each group title shows how many of its codes you selected.
-- **New in 0.1.5** — selected error codes floated to the front of the chip list, with the unselected ones after them. (Retired: that made a clicked chip jump position — see the click-jump fix above. The order inside each group is now constant.)
-- **New in 0.1.3** — configurable `retryableCodes`: extra failure codes to retry on, **merged** into each provider's own list (never replaces it). Defaults to `INVALID_REQUEST` + `PI_AI_ERROR`, so OpenAI-style HTTP 400 errors (thinking-mode `reasoning_text`) and generic stream failures get retried out of the box.
-- Default `enabled: false` = fully bypassed; nothing changes until you enable the override.
+- 请求重试是在同一次请求内重试. 其余三组是在回合结束后发送一条新的插件消息, 不伪装成 user 输入.
+- `中止并自动继续` 完整启用重复检测, 中止和继续. 不需要开启 token 续写或请求重试.
+- 三类自动继续的次数上限默认各 `2` 次, 在同一条自动恢复链中分别累计. 切换触发原因不重置计数, 模型正常完成或 user 发言后才全部重置.
+- 次数为 `0` 时, 对应组不发送继续. 重复检测仍会中止输出.
+- 真人手动停止不自动继续. 已有 user 消息排队时让位给该消息. 等待期间开关关闭, 模式改变, 上限耗尽, 新回合开始或会话离场, 都会放弃过期投递.
+- 各组关闭时参数仍可编辑. 只有保存才写入 profile patch, 离开页面会丢弃未保存的草稿.
+- 参数, 内容和凭证等确定性错误不触发最终失败恢复. 错误恢复处理超时, 传输, 服务端, 流中断和空响应等可恢复错误.
 
-## Install
+## 重复检测
 
-Prerequisite: a DSH Desktop profile (the web profile lives at `~/.dsh/profiles/web`).
+思考和正文分别检测连续精确重复, 不检测工具参数, 标题生成或上下文压缩. 默认要求连续重复至少 `8` 次, 且累计至少 `256` 个 Unicode 字符, 两个条件必须同时满足.
 
-### Option A — GitHub Release package (recommended)
+每 `32` 个新字符检查一次, 重复单元最多 `1024` 个字符, 检测窗口有内存上限. 相似但不相同的表达不触发. 正常长串重复也可能命中, 可提高阈值或选择关闭.
 
-```bash
-# 1. download the packaged plugin tgz from the v0.1.12 release
-gh release download v0.1.12 -R zeng6125-rgb/dsh-llm-retry-settings
+中止通过 agent 的公开取消接口执行. 保留已有输出和排队输入, 不删除已提交的重复尾部, 不伪造 token 上限或补造未执行工具的结果. 真人停止, 其他插件中止及旧会话恢复不触发重复自动继续.
 
-# 2. unpack it into the profile's node_modules
-mkdir -p ~/.dsh/profiles/web/node_modules
-tar -xzf dsh-llm-retry-settings-0.1.12.tgz -C ~/.dsh/profiles/web/node_modules/
-mv ~/.dsh/profiles/web/node_modules/package \
-   ~/.dsh/profiles/web/node_modules/dsh-llm-retry-settings
+## 配置格式与迁移
 
-# 3. register the bundle in the profile, then restart DSH
-#    add "dsh-llm-retry-settings" to dsh.profile.bundles
-#    in ~/.dsh/profiles/web/package.json
-```
+配置格式版本是 `configVersion: 2`, 与插件发布版本无关. 无版本号或版本 `1` 的配置自动迁移, 通过正式 Settings 服务原子写回并清理旧开关. 并发编辑以设置修订号保护, 不直接改写 profile 文件.
 
-### Option B — dsh CLI / pnpm (requires git + network)
+- 旧 `repeatDetection=true` 转为 `repeatMode=continue`, 即中止并自动继续, 即使旧 `autoContinue=false` 也生效.
+- 旧 token 续写开关, 上限及提示词保留. `autoContinue` 此后仅控制 token 上限续写.
+- 旧错误恢复只有在 `autoContinue` 和 `continueOnError` 均开启时迁移为开启, 保持此前实际行为. 旧续写提示词复制到错误专用提示词.
+- 新的重复和错误恢复上限各默认 `2`, 不继承旧的共用上限. 后续修改或恢复默认不再被旧字段覆盖.
 
-The `dsh plugin` command forwards its arguments to `pnpm` in the profile directory:
+| 组 | 配置键 | 默认值 |
+| --- | --- | --- |
+| 请求重试 | `enabled`, `maxRetries`, `initialDelayMs`, `maxDelayMs`, `jitterRatio` | `false`, `2`, `500`, `10000`, `0.1` |
+| 请求重试 | `retryableCodes`, `overrides` | `["INVALID_REQUEST", "PI_AI_ERROR"]`, `[]` |
+| token 续写 | `autoContinue`, `maxContinuations`, `continuationPrompt` | `false`, `2`, `""` |
+| 重复处理 | `repeatMode`, `repeatMaxContinuations`, `repeatContinuationPrompt` | `off`, `2`, `""` |
+| 重复阈值 | `repeatMinRepeats`, `repeatMinChars` | `8`, `256` |
+| 错误恢复 | `errorContinue`, `errorMaxContinuations`, `errorContinuationPrompt` | `false`, `2`, `""` |
 
-```bash
-# from a git repo (pnpm clones it; the committed lib/ means no build needed)
-dsh plugin --profile web add github:zeng6125-rgb/dsh-llm-retry-settings
+`repeatMode` 可选 `off`, `stop`, `continue`. 重复次数范围 `3-20`, 字符阈值范围 `64-8192`. 空提示词使用各组内置文案. 额外错误码与 provider 自带列表取并集, provider/model 覆盖按顺序取第一条命中, `*` 匹配任意值, 数值 `-1` 表示继承.
 
-# or from the release tarball URL
-dsh plugin --profile web add https://github.com/zeng6125-rgb/dsh-llm-retry-settings/releases/download/v0.1.12/dsh-llm-retry-settings-0.1.12.tgz
-```
+## 安装与使用
 
-Then enable the plugin in the profile: add `"dsh-llm-retry-settings"` to `dsh.profile.bundles` (or use the Desktop plugin-inventory UI) and restart DSH.
-
-> Note: the command is `dsh plugin` (a subcommand of the `dsh` CLI), not `dsh-plugin`. The `dsh` CLI is bundled with the Desktop app; if it is not on your `PATH`, invoke it via the app's `node_modules` bin, e.g. `node "<app>/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --profile web ...`.
-
-### Option C — from source
-
-```bash
-git clone https://github.com/zeng6125-rgb/dsh-llm-retry-settings.git
-cd dsh-llm-retry-settings
-pnpm install
-pnpm run build       # node scripts/build.mjs → lib/index.js + lib/client.js (no DSH checkout needed)
-```
-
-Link the local build into the profile and register the bundle:
-
-```bash
-dsh plugin --profile web link "$PWD"
-# then add "dsh-llm-retry-settings" to dsh.profile.bundles and restart DSH
-```
-
-## Usage
-
-1. Open the **Plugins** entry in the DSH sidebar.
-2. Under **Installed**, open `dsh-llm-retry-settings`; its configuration sits right below the plugin description.
-3. Turn on the **Override retry policy** switch (`enabled`).
-4. Set `maxRetries` / `initialDelayMs` / `maxDelayMs` / `jitterRatio`, pick extra **retryable codes** (chips) — or type a code the list does not know into the `Custom` group — and click **Save**.
-5. Optionally toggle **Auto-continue on truncation** (`autoContinue`) and set its `Max consecutive continuations` cap — independent of the retry override above. The line it sends can be rewritten in **Continuation prompt**; leave it empty for the built-in wording.
-
-Changes are written to the profile entry `llm-retry-settings` (the settings namespace is the profile entry id) and picked up live by the retry engine.
-
-## Troubleshooting
-
-**A truncated reply did not get continued.** The host half logs every decision it makes to
-`~/.dsh/logs/dsh-llm-retry-settings/host.log` — one line per event, capped at 256 KB. `ctx.logger`
-output is not persisted anywhere in desktop builds, so this file is the only way to see what happened.
-Read the last lines:
-
-- no `activate v…` line at boot → the plugin is not loaded (check `dsh.profile.bundles` in the profile).
-- `activate v…` names the running build — if it is not the version you installed, the agent was not restarted.
-- `settings registered … autoContinue=false` → the switch is off.
-- a `turn/end …` line with nothing after it → `autoContinue` was off at that moment, or `maxContinuations` is `0`.
-- `bail …` → the reason is in the line (no agent instance for this session, `followup` unavailable, …).
-- `放弃投递 …` → the agent was still busy when the follow-up was ready, and something changed in the meantime (a new turn started, you typed a message, the session was disposed), so the stale continuation was dropped on purpose.
-- `续写已投递 … chain=N/M` → the continuation was queued. `连续续写触顶` means the `maxContinuations` cap is hit; the chain resets as soon as the model finishes a turn normally or you send a message.
-
-**Host-half changes (`lib/index.js`) need a DSH restart.** The client card reloads with the page; the agent does not.
-
-## 重复输出保护
-
-启用 `repeatDetection` 并保存后, 插件实时检测思维链和正文的连续精确重复. 默认要求至少 8 次重复及 256 个 Unicode 字符, 两个阈值同时满足才中止. 每 32 个新字符检查一次, 重复单元最多 1024 个字符, 内存窗口有上限. 正常长串重复也可能命中, 可提高阈值或关闭保护.
-
-中止采用 agent 的公开取消接口, 保留已输出内容但不删除重复尾部, 不伪造 token 上限, 不保留未执行的工具调用. 工具参数, 上下文压缩和标题生成不检测. 聊天中该回复会标记为中断.
-
-要自动发送继续, 同时开启 `autoContinue`, 且 `maxContinuations` 大于 0. 重复, token 截断和错误续写共用该上限, 已排队的用户消息保留且优先. 真人停止, 其他插件中止和旧会话恢复不触发重复续写. `repeatContinuationPrompt` 留空时使用停止重复并继续有效内容的专用指令. 观测面板记录次数和类型, 不保存原始输出文本.
-
-## Configuration
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | boolean | `false` | Enable the retry-policy override. |
-| `maxRetries` | integer (≥ 0) | `2` | Maximum retry count (`0` = do not retry). |
-| `initialDelayMs` | integer (≥ 1) | `500` | Initial backoff before the first retry (ms). |
-| `maxDelayMs` | integer (≥ 1) | `10000` | Upper bound for backoff (ms). |
-| `jitterRatio` | number (0–1) | `0.1` | Random jitter applied to backoff (0 = none). |
-| `retryableCodes` | string[] | `["INVALID_REQUEST", "PI_AI_ERROR"]` | Extra failure codes treated as retryable, **merged** into each provider's own list. |
-| `autoContinue` | boolean | `false` | When a turn ends truncated by the output-token ceiling, queue one follow-up "continue" turn automatically. |
-| `maxContinuations` | integer (≥ 0) | `2` | Cap on consecutive auto-continuations per truncation (`0` = never continue). |
-| `continuationPrompt` | string | `""` | The line sent to the model after a truncation; empty (or whitespace-only) falls back to the built-in wording. |
-| `continueOnError` | boolean | `false` | Also continue once when a turn ends in a transient error after the retries are exhausted (timeout / transport / server / stream break / empty response). Deterministic failures are never continued. |
-| `repeatDetection` | boolean | `false` | 实时检测连续重复并中止生成. 自动继续还需要开启 `autoContinue`. |
-| `repeatMinRepeats` | integer (3-20) | `8` | 最少连续重复次数, 与字符阈值同时满足才截断. |
-| `repeatMinChars` | integer (64-8192) | `256` | 最少重复 Unicode 字符数. |
-| `repeatContinuationPrompt` | string | `""` | 重复中止后的专用续写指令, 留空使用内置文案. |
-| `overrides` | array | `[]` | Per provider/model policy. Each row: `{ provider, model, maxRetries, initialDelayMs, maxDelayMs, jitterRatio }`; `*` or empty matches anything, and a numeric `-1` inherits the global value. First matching row wins. |
-| `logPath` | string | (host-injected) | **Read-only.** Absolute path of the host log, injected by the host half for the card's "Open log" button. Not persisted. |
-
-## How it works
-
-The host half registers the `dsh-llm-retry` settings namespace (schema validation + persistence + live sync) and **prepends** an `agent/request-error` listener that rewrites `retryPolicy` before the official `@deepseek-ai/dsh-llm-retry` recover runs:
-
-```text
-agent/request-error  →  [this plugin: override count/backoff]  →  dsh-llm-retry recover
-```
-
-The auto-continue half listens to the session log instead, because a truncated reply is a *successful* request:
-
-```text
-adapter finish="max-tokens"  →  agent-loop turn/end{reason:"max-tokens"}  →  [this plugin]  →  agent.followup(continuationPrompt || built-in wording)
-```
-
-`turn-stopping` cannot be used for this: its payload carries no end reason, so it cannot tell "the model finished" from "the model was cut off".
-The continuation is sent as a `plugin`-sourced user message, so the chat renders it as an injected-context row labelled `dsh-llm-retry` rather than
-pretending you typed it. Constructor-seeded events (resume / fork / replay) never reach `session/event`, so reopening an old truncated session does
-not trigger a continuation.
-
-Which wording works is provider-dependent: some relays do not echo the previous `reasoning` back on the next request, so the model cannot see where
-its thinking stopped and may restart the task. If that happens, rewrite `continuationPrompt` (e.g. ask it to answer directly without re-thinking) —
-sending more "continue" messages cannot fix it.
-
-## UI
-
-Plugins manager → Installed → `dsh-llm-retry-settings` → the configuration region right below the plugin description. Edits are draft-based: only **Save** writes to the profile patch layer, and leaving the page drops the unsaved drafts — which is why there is no separate Discard button.
-
-The structure follows the official settings UI: boolean fields are rows with the label and its notes on the left and the switch on the right; numbers use the official `SettingsValueField` (the label row carries "Overridden / Reset to default", which appears as soon as you change something); the four pieces the official components have no equivalent for (backoff curve, error-code multi-select, provider/model override table, observation panel) are wrapped in the official `fieldset` + `legend` container. The page does not repeat the plugin name or description — the Plugins page already shows those above it.
-
-The two switches (**Override retry policy** / **Auto-continue on truncation**) each own one half of the configuration. While a switch is off its contents stay **editable**: set them up the way you want, then turn the switch on to make them take effect — until then those values never reach a request. The error-code chips keep a constant order inside a group, so clicking one only changes its selected state.
-
-## Requirements
-
-- Host plugin: `@deepseek-ai/dsh-llm-retry`
-- Kernel services: `settings` (SettingsForms), `connection` (the authenticated channel the observation routes register on, a soft dependency)
-- Browser platform modules: `react`, `@deepseek-ai/dsh-client-ui-primitives` (the official form frame and atoms), `@deepseek-ai/dsh-client-store`, `@deepseek-ai/dsh-client-ui-slots`
-
-## Build
+需要 DSH `>=0.2.0-rc.1 <0.3.0`, 以及宿主的 `settings`, `agents`, `sessions` 服务. 插件自带配置 UI, 不需要另外安装 UI 包.
 
 ```shell
-just verify           # 类型检查, 构建和无凭据回归测试
+dsh plugin --profile web add github:azazo1/dsh-llm-retry-settings
 ```
+
+在目标 profile 启用插件后重启 DSH. 打开 `插件 -> 已安装 -> dsh-llm-retry-settings`, 设置区位于简介下方. 宿主构建更新后需要重新加载插件或重启 DSH, 仅刷新页面不会更新宿主逻辑.
+
+## 观测与排错
+
+页面末尾显示重试, 重复中止, 自动继续, 触顶和让位 user 的计数, 以及 provider/model 明细. 日志默认在 `~/.dsh/logs/dsh-llm-retry-settings/host.log`, 也可由设置页定位. 日志不保存原始模型输出.
+
+恢复诊断会标出 `recovery=token|repeat|error`, 本组启用状态和 `count=N/M`. `bail` 表示触顶或无法投递, `放弃过期投递` 表示等待期间状态变化, `续写已投递` 表示已成功入队. 配置迁移写回失败会记录原因, 有效配置仍按新格式运行.
+
+观测路由通过 `connection.fetch.register` 的认证 `/api` 通道提供, 不绕过内核的 Host/Origin 与会话认证.
+
+## 开发
+
+```shell
+just verify           # 类型检查, 构建及无凭据回归测试
+```
+
+构建包含宿主和客户端, 发布产物位于 `lib/`. 回归覆盖真实 Loader 热更新, 配置迁移写回, 独立恢复预算及停止后的投递行为.
 
 ## License
 

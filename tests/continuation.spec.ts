@@ -15,7 +15,7 @@ setDiagActive(false)
 
 function harness(options = {}) {
   const ctx = new Context()
-  const config = normalizeConfig({ repeatDetection: true, autoContinue: true, ...options })
+  const config = normalizeConfig({ configVersion: 2, repeatMode: 'continue', autoContinue: true, ...options })
   const live = { current: () => config }
   const journal: any[] = []
   const session = { id: 'test-session', get seq() { return journal.length }, eventAt: (i: number) => journal[i] }
@@ -119,8 +119,9 @@ test('真人停止和其他 hook 不续写, 首个取消原因优先', async () 
   }
 })
 
-test('重复和 max-tokens 共用续写上限, 真人消息重置', async () => {
-  const h = harness({ maxContinuations: 2, repeatContinuationPrompt: 'repeat-prompt', continuationPrompt: 'token-prompt' })
+test('重复和 token 上限分别累计, 切换原因不重置, 真人消息重置', async () => {
+  const h = harness({ maxContinuations: 1, repeatMaxContinuations: 1,
+    repeatContinuationPrompt: 'repeat-prompt', continuationPrompt: 'token-prompt' })
   h.start(1)
   h.chunk('text-delta', 'x'.repeat(300))
   h.end(1)
@@ -145,12 +146,12 @@ test('重复和 max-tokens 共用续写上限, 真人消息重置', async () => 
   await h.ctx.fiber.dispose()
 })
 
-test('检测与续写独立开关, 次数为零仍截断但不发送继续', async () => {
-  for (const options of [{ repeatDetection: false }, { autoContinue: false }, { maxContinuations: 0 }]) {
+test('重复三种模式和独立上限为零控制中止及发送', async () => {
+  for (const options of [{ repeatMode: 'off' }, { repeatMode: 'stop' }, { repeatMaxContinuations: 0 }]) {
     const h = harness(options)
     h.start(1)
     h.chunk('text-delta', 'x'.repeat(300))
-    assert.equal(h.cancellations.length, options.repeatDetection === false ? 0 : 1)
+    assert.equal(h.cancellations.length, options.repeatMode === 'off' ? 0 : 1)
     h.end(1)
     await setImmediate()
     assert.equal(h.delivered.length, 0)
@@ -176,15 +177,15 @@ test('正文与思维链, 不同块和不同 attempt 不串扰, 工具参数及�
 })
 
 test('重复卡流中打开开关立即生效, 关闭时清空旧检测窗口', async () => {
-  const h = harness({ repeatDetection: false })
+  const h = harness({ repeatMode: 'off' })
   h.start(1)
   h.chunk('text-delta', 'x'.repeat(300))
   assert.equal(h.cancellations.length, 0)
-  h.config.repeatDetection = true
+  h.config.repeatMode = 'continue'
   h.chunk('text-delta', 'x'.repeat(128))
-  h.config.repeatDetection = false
+  h.config.repeatMode = 'off'
   h.chunk('text-delta', 'x'.repeat(128))
-  h.config.repeatDetection = true
+  h.config.repeatMode = 'continue'
   h.chunk('text-delta', 'x'.repeat(128))
   assert.equal(h.cancellations.length, 0)
   h.chunk('text-delta', 'x'.repeat(128))
@@ -192,6 +193,43 @@ test('重复卡流中打开开关立即生效, 关闭时清空旧检测窗口', 
   h.end(1)
   await setImmediate()
   assert.equal(h.delivered.length, 1)
+  await h.ctx.fiber.dispose()
+})
+
+test('恢复开关互不依赖, 专用提示词和独立预算在交替原因中生效', async () => {
+  const h = harness({ autoContinue: false, maxContinuations: 0, errorContinue: true,
+    errorMaxContinuations: 1, repeatMaxContinuations: 1, errorContinuationPrompt: 'error-prompt' })
+  h.start(1)
+  h.chunk('reasoning-delta', 'x'.repeat(300))
+  h.end(1)
+  await setImmediate()
+  assert.equal(h.delivered.length, 1)
+  h.start(2)
+  h.end(2, { kind: 'max-tokens' })
+  await setImmediate()
+  assert.equal(h.delivered.length, 1)
+  h.start(3)
+  h.end(3, { kind: 'error', error: { code: 'SERVER' } })
+  await setImmediate()
+  assert.equal(h.delivered.length, 2)
+  assert.equal(h.delivered[1].content[0].text, 'error-prompt')
+  h.start(4)
+  h.chunk('text-delta', 'x'.repeat(300))
+  h.end(4)
+  h.start(5)
+  h.end(5, { kind: 'error', error: { code: 'SERVER' } })
+  await setImmediate()
+  assert.equal(h.delivered.length, 2)
+  h.start(6)
+  h.end(6, { kind: 'completed' })
+  h.start(7)
+  h.end(7, { kind: 'error', error: { code: 'SERVER' } })
+  await setImmediate()
+  assert.equal(h.delivered.length, 3)
+  h.start(8)
+  h.end(8, { kind: 'error', error: { code: 'INVALID_REQUEST' } })
+  await setImmediate()
+  assert.equal(h.delivered.length, 3)
   await h.ctx.fiber.dispose()
 })
 
@@ -211,9 +249,9 @@ test('用户排队消息保留并优先于续写', async () => {
 
 test('等待 idle 时配置关闭, 排队输入和 dispose 均使待发续写失效', async () => {
   for (const mutate of [
-    (h: any) => { h.config.autoContinue = false },
-    (h: any) => { h.config.repeatDetection = false },
-    (h: any) => { h.config.maxContinuations = 0 },
+    (h: any) => { h.config.repeatMode = 'stop' },
+    (h: any) => { h.config.repeatMode = 'off' },
+    (h: any) => { h.config.repeatMaxContinuations = 0 },
     (h: any) => { h.agent.inbox.nextTurn.push({ id: 'user' }) },
     (h: any) => { h.ctx.emit('session/disposed', h.agent.session) },
     (h: any) => { h.ctx.emit(agentCarrier(h.agent), 'agent/disposed', { agent: h.agent }) },

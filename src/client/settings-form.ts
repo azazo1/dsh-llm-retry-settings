@@ -18,7 +18,8 @@ import type {
   SettingsFormScope,
   SettingsFormShell,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { DEFAULTS, OVERRIDE_INHERIT, OVERRIDE_MAX_ROWS, REPEAT_LIMITS, type PolicyOverride } from '../shared.ts'
+import { DEFAULTS, OVERRIDE_INHERIT, OVERRIDE_MAX_ROWS, REPEAT_LIMITS, type PolicyOverride, type RepeatMode } from '../shared.ts'
+import { migrateConfig, migrationPatch } from '../config-migration.ts'
 import { CODE_RE } from './codes.ts'
 
 /** 卡片读到的配置形状 (就是 profile patch 里的那几个字段). */
@@ -32,8 +33,14 @@ export interface RetrySettings {
   autoContinue?: boolean
   maxContinuations?: number
   continuationPrompt?: string
-  continueOnError?: boolean
+  errorContinue?: boolean
+  repeatMode?: RepeatMode
+  configVersion?: number
   repeatDetection?: boolean
+  continueOnError?: boolean
+  repeatMaxContinuations?: number
+  errorMaxContinuations?: number
+  errorContinuationPrompt?: string
   repeatMinRepeats?: number
   repeatMinChars?: number
   repeatContinuationPrompt?: string
@@ -65,8 +72,11 @@ export interface RetryOverrides {
   autoContinue: boolean
   maxContinuations: boolean
   continuationPrompt: boolean
-  continueOnError: boolean
-  repeatDetection: boolean
+  errorContinue: boolean
+  errorMaxContinuations: boolean
+  errorContinuationPrompt: boolean
+  repeatMode: boolean
+  repeatMaxContinuations: boolean
   repeatMinRepeats: boolean
   repeatMinChars: boolean
   repeatContinuationPrompt: boolean
@@ -85,8 +95,11 @@ export interface RetryCardState extends SettingsFormShell {
   autoContinue: boolean
   maxContinuationsText: string
   continuationPrompt: string
-  continueOnError: boolean
-  repeatDetection: boolean
+  errorContinue: boolean
+  errorMaxContinuationsText: string
+  errorContinuationPrompt: string
+  repeatMode: RepeatMode
+  repeatMaxContinuationsText: string
   repeatMinRepeatsText: string
   repeatMinCharsText: string
   repeatContinuationPrompt: string
@@ -109,10 +122,10 @@ export interface RetryCardFace extends SettingsFormActions {
   setEnabled(next: boolean): void
   /** 输出截断自动续写开关. */
   setAutoContinue(next: boolean): void
-  /** 重试耗尽后也续写开关. */
-  setContinueOnError(next: boolean): void
-  /** 实时重复检测开关. */
-  setRepeatDetection(next: boolean): void
+  /** 最终可恢复错误结束后发送新消息的开关. */
+  setErrorContinue(next: boolean): void
+  /** 重复输出处理模式. */
+  setRepeatMode(next: RepeatMode): void
   /** 改一个文本草稿字段. */
   editText(field: TextFieldName, text: string): void
   /** 勾选 / 取消一个补充错误码. */
@@ -140,6 +153,9 @@ export type TextFieldName =
   | 'repeatMinRepeatsText'
   | 'repeatMinCharsText'
   | 'repeatContinuationPrompt'
+  | 'repeatMaxContinuationsText'
+  | 'errorMaxContinuationsText'
+  | 'errorContinuationPrompt'
 
 /** 草稿里可以显式写入的字段. */
 interface FieldValues {
@@ -152,8 +168,11 @@ interface FieldValues {
   autoContinue: boolean
   maxContinuationsText: string
   continuationPrompt: string
-  continueOnError: boolean
-  repeatDetection: boolean
+  errorContinue: boolean
+  errorMaxContinuationsText: string
+  errorContinuationPrompt: string
+  repeatMode: RepeatMode
+  repeatMaxContinuationsText: string
   repeatMinRepeatsText: string
   repeatMinCharsText: string
   repeatContinuationPrompt: string
@@ -270,8 +289,8 @@ export class RetrySettingsForm {
       hooks: { retryCard: this.store },
       setEnabled: (next) => { this.setField('enabled', next) },
       setAutoContinue: (next) => { this.setField('autoContinue', next) },
-      setContinueOnError: (next) => { this.setField('continueOnError', next) },
-      setRepeatDetection: (next) => { this.setField('repeatDetection', next) },
+      setErrorContinue: (next) => { this.setField('errorContinue', next) },
+      setRepeatMode: (next) => { this.setField('repeatMode', next) },
       editText: (field, text) => { this.setField(field, text) },
       toggleCode: (code) => {
         const codes = this.field('retryableCodes')
@@ -402,6 +421,7 @@ export class RetrySettingsForm {
 
   /** 从一个配置层里取某个草稿字段的值. */
   private project<K extends FieldName>(name: K, layer: RetrySettings | undefined): FieldValues[K] {
+    layer = { ...DEFAULTS, ...migrateConfig(layer) }
     switch (name) {
       case 'enabled': return (layer?.enabled === true) as FieldValues[K]
       case 'maxRetriesText': return String(layer?.maxRetries ?? 0) as FieldValues[K]
@@ -412,8 +432,11 @@ export class RetrySettingsForm {
       case 'autoContinue': return (layer?.autoContinue === true) as FieldValues[K]
       case 'maxContinuationsText': return String(layer?.maxContinuations ?? 0) as FieldValues[K]
       case 'continuationPrompt': return (layer?.continuationPrompt ?? '') as FieldValues[K]
-      case 'continueOnError': return (layer?.continueOnError === true) as FieldValues[K]
-      case 'repeatDetection': return (layer?.repeatDetection === true) as FieldValues[K]
+      case 'errorContinue': return (layer?.errorContinue === true) as FieldValues[K]
+      case 'repeatMode': return (layer.repeatMode ?? DEFAULTS.repeatMode) as FieldValues[K]
+      case 'repeatMaxContinuationsText': return String(layer.repeatMaxContinuations ?? DEFAULTS.repeatMaxContinuations) as FieldValues[K]
+      case 'errorMaxContinuationsText': return String(layer.errorMaxContinuations ?? DEFAULTS.errorMaxContinuations) as FieldValues[K]
+      case 'errorContinuationPrompt': return (layer.errorContinuationPrompt ?? '') as FieldValues[K]
       case 'repeatMinRepeatsText': return String(layer?.repeatMinRepeats ?? DEFAULTS.repeatMinRepeats) as FieldValues[K]
       case 'repeatMinCharsText': return String(layer?.repeatMinChars ?? DEFAULTS.repeatMinChars) as FieldValues[K]
       case 'repeatContinuationPrompt': return (layer?.repeatContinuationPrompt ?? '') as FieldValues[K]
@@ -452,6 +475,8 @@ export class RetrySettingsForm {
     const maxDelayMsText = this.field('maxDelayMsText')
     const jitterPercentText = this.field('jitterPercentText')
     const maxContinuationsText = this.field('maxContinuationsText')
+    const repeatMaxContinuationsText = this.field('repeatMaxContinuationsText')
+    const errorMaxContinuationsText = this.field('errorMaxContinuationsText')
     const repeatMinRepeatsText = this.field('repeatMinRepeatsText')
     const repeatMinCharsText = this.field('repeatMinCharsText')
     const numbersInvalid = nonNegativeInt(maxRetriesText) === undefined
@@ -459,6 +484,8 @@ export class RetrySettingsForm {
       || positiveInt(maxDelayMsText) === undefined
       || percentToRatio(jitterPercentText) === undefined
       || nonNegativeInt(maxContinuationsText) === undefined
+      || nonNegativeInt(repeatMaxContinuationsText) === undefined
+      || nonNegativeInt(errorMaxContinuationsText) === undefined
       || !inRange(repeatMinRepeatsText, REPEAT_LIMITS.minRepeats, REPEAT_LIMITS.maxRepeats)
       || !inRange(repeatMinCharsText, REPEAT_LIMITS.minChars, REPEAT_LIMITS.maxChars)
       || overrides.some((row) => (
@@ -485,8 +512,11 @@ export class RetrySettingsForm {
       autoContinue: this.field('autoContinue'),
       maxContinuationsText,
       continuationPrompt: this.field('continuationPrompt'),
-      continueOnError: this.field('continueOnError'),
-      repeatDetection: this.field('repeatDetection'),
+      errorContinue: this.field('errorContinue'),
+      repeatMode: this.field('repeatMode'),
+      repeatMaxContinuationsText,
+      errorMaxContinuationsText,
+      errorContinuationPrompt: this.field('errorContinuationPrompt'),
       repeatMinRepeatsText,
       repeatMinCharsText,
       repeatContinuationPrompt: this.field('repeatContinuationPrompt'),
@@ -501,14 +531,17 @@ export class RetrySettingsForm {
         autoContinue: this.overriddenOf('autoContinue'),
         maxContinuations: this.overriddenOf('maxContinuationsText'),
         continuationPrompt: this.overriddenOf('continuationPrompt'),
-        continueOnError: this.overriddenOf('continueOnError'),
-        repeatDetection: this.overriddenOf('repeatDetection'),
+        errorContinue: this.overriddenOf('errorContinue'),
+        repeatMode: this.overriddenOf('repeatMode'),
+        repeatMaxContinuations: this.overriddenOf('repeatMaxContinuationsText'),
+        errorMaxContinuations: this.overriddenOf('errorMaxContinuationsText'),
+        errorContinuationPrompt: this.overriddenOf('errorContinuationPrompt'),
         repeatMinRepeats: this.overriddenOf('repeatMinRepeatsText'),
         repeatMinChars: this.overriddenOf('repeatMinCharsText'),
         repeatContinuationPrompt: this.overriddenOf('repeatContinuationPrompt'),
         overrides: this.overriddenOf('overrides'),
       },
-      hostFresh: logPath !== '',
+      hostFresh: logPath !== '' && value?.configVersion !== undefined,
       logPath,
     }
   }
@@ -524,6 +557,14 @@ export class RetrySettingsForm {
       if (!this.userLayerHas(name)) continue
       ops.push({ op: 'unset', path: [configPathOf(name)] })
     }
+    if (ops.length > 0 && (this.scope.getSnapshot().value?.configVersion ?? 1) < DEFAULTS.configVersion) {
+      const touched = new Set(ops.map(op => op.path[0]))
+      const migrated = Object.entries(migrationPatch(this.scope.getSnapshot().value ?? {}))
+        .filter(([key, value]) => value !== undefined && !touched.has(key))
+        .map(([key, value]) => ({ op: 'set' as const, path: [key], value }))
+      return [...migrated, ...ops,
+        { op: 'unset', path: ['repeatDetection'] }, { op: 'unset', path: ['continueOnError'] }]
+    }
     return ops
   }
 
@@ -533,6 +574,8 @@ export class RetrySettingsForm {
     switch (name) {
       case 'maxRetriesText':
       case 'maxContinuationsText':
+      case 'repeatMaxContinuationsText':
+      case 'errorMaxContinuationsText':
       case 'repeatMinRepeatsText':
       case 'repeatMinCharsText': {
         const parsed = nonNegativeInt(String(value))
@@ -563,6 +606,8 @@ export class RetrySettingsForm {
         return JSON.stringify(rows) === JSON.stringify(this.effectiveValue(name)) ? undefined : { op: 'set', path: [path], value: rows }
       }
       case 'continuationPrompt':
+      case 'errorContinuationPrompt':
+      case 'repeatMode':
       case 'repeatContinuationPrompt': {
         const text = String(value)
         return text === this.effectiveValue(name) ? undefined : { op: 'set', path: [path], value: text }
@@ -585,6 +630,7 @@ export class RetrySettingsForm {
 function isTextFieldName(field: string): field is TextFieldName {
   return field === 'maxRetriesText' || field === 'initialDelayMsText' || field === 'maxDelayMsText'
     || field === 'jitterPercentText' || field === 'maxContinuationsText' || field === 'continuationPrompt'
+    || field === 'repeatMaxContinuationsText' || field === 'errorMaxContinuationsText' || field === 'errorContinuationPrompt'
     || field === 'repeatMinRepeatsText' || field === 'repeatMinCharsText' || field === 'repeatContinuationPrompt'
 }
 
@@ -596,6 +642,8 @@ function configPathOf(name: FieldName): string {
     case 'maxDelayMsText': return 'maxDelayMs'
     case 'jitterPercentText': return 'jitterRatio'
     case 'maxContinuationsText': return 'maxContinuations'
+    case 'repeatMaxContinuationsText': return 'repeatMaxContinuations'
+    case 'errorMaxContinuationsText': return 'errorMaxContinuations'
     case 'repeatMinRepeatsText': return 'repeatMinRepeats'
     case 'repeatMinCharsText': return 'repeatMinChars'
     default: return name
@@ -610,15 +658,18 @@ function draftFieldOf(path: string): FieldName | undefined {
     case 'maxDelayMs': return 'maxDelayMsText'
     case 'jitterRatio': return 'jitterPercentText'
     case 'maxContinuations': return 'maxContinuationsText'
+    case 'repeatMaxContinuations': return 'repeatMaxContinuationsText'
+    case 'errorMaxContinuations': return 'errorMaxContinuationsText'
+    case 'errorContinuationPrompt': return 'errorContinuationPrompt'
     case 'repeatMinRepeats': return 'repeatMinRepeatsText'
     case 'repeatMinChars': return 'repeatMinCharsText'
-    case 'repeatDetection': return 'repeatDetection'
+    case 'repeatMode': return 'repeatMode'
     case 'repeatContinuationPrompt': return 'repeatContinuationPrompt'
     case 'enabled': return 'enabled'
     case 'retryableCodes': return 'retryableCodes'
     case 'autoContinue': return 'autoContinue'
     case 'continuationPrompt': return 'continuationPrompt'
-    case 'continueOnError': return 'continueOnError'
+    case 'errorContinue': return 'errorContinue'
     case 'overrides': return 'overrides'
     default: return undefined
   }

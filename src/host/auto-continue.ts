@@ -1,5 +1,5 @@
 /**
- * 输出 token 上限截断后的自动续写.
+ * token 上限, 重复输出中止与最终可恢复错误结束后的自动恢复.
  *
  * 为什么不能走 `agent/request-error`: max-tokens 根本不是错误——适配器把 stop_reason
  * `length` 映射成 `{ kind: 'max-tokens' }`, agent-loop 只是结束回合, 请求本身是成功
@@ -19,7 +19,8 @@ import type { Context } from '@deepseek-ai/cordis'
 // cordis 的 Events 表, 运行时不需要这两个包.
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-session'
-import { DEFAULT_CONTINUATION_PROMPT, DEFAULT_REPEAT_CONTINUATION_PROMPT, PRODUCER_ID } from '../shared.ts'
+import { PRODUCER_ID } from '../shared.ts'
+import { recoveryPolicy, type RecoveryKind } from './recovery-policy.ts'
 import type { RepetitionGuard } from './repetition/guard.ts'
 import { diag } from './diag.ts'
 import type { LiveConfig } from './live-config.ts'
@@ -29,7 +30,7 @@ import type { SessionModels } from './session-models.ts'
 /** 会话账本上限 (防长跑进程无界增长). */
 const STATE_MAX = 200
 
-/** `continueOnError=true` 时值得再补一轮的瞬时错误码; 确定性错误 (参数/内容/凭证) 不补. */
+/** 最终错误结束后值得补一轮的瞬时错误码, 确定性错误不补. */
 const TRANSIENT_CONTINUE_CODES = new Set([
   'PI_AI_ERROR',
   'TRANSPORT',
@@ -45,10 +46,11 @@ const TRANSIENT_CONTINUE_CODES = new Set([
 
 /** 一个会话的自动续写账本. */
 interface ContinueState {
-  /** 本轮截断链上已经补了几次续写. */
-  chain: number
-  /** 已因触顶拒绝过 (只提示一次, 不刷屏). */
-  capped: boolean
+  /** 同一条恢复链分别累计, 切换原因不重置. */
+  counts: Record<RecoveryKind, number>
+  capped: Set<RecoveryKind>
+  /** 重置后让等待中的旧投递失效. */
+  generation: number
   /**
    * 已处理过的 turn/end 回合号: `session/event` 与 `agent/status` 两条触发路径共用,
    * 保证同一次截断最多续写一轮. 回合号单调递增, 所以它同时就是 "上一次已投递" 的
@@ -218,7 +220,7 @@ export class AutoContinue {
   private stateOf(id: string): ContinueState {
     let state = this.states.get(id)
     if (state === undefined) {
-      state = { chain: 0, capped: false, lastTurn: -1 }
+      state = { counts: { token: 0, repeat: 0, error: 0 }, capped: new Set(), generation: 0, lastTurn: -1 }
       this.states.set(id, state)
       while (this.states.size > STATE_MAX) {
         const oldest = this.states.keys().next().value
@@ -227,6 +229,12 @@ export class AutoContinue {
       }
     }
     return state
+  }
+
+  private resetChain(state: ContinueState): void {
+    state.counts = { token: 0, repeat: 0, error: 0 }
+    state.capped.clear()
+    state.generation += 1
   }
 
   private onSessionEvent(session: any, event: any): void {
@@ -240,9 +248,8 @@ export class AutoContinue {
           const kind = source?.kind
           // 真人重新发言 = 旧截断链作废, 计数归零.
           if (kind === 'user') {
-            if (state.chain > 0) diag(`人工发言，重置续写链 session=${session.id} chain=${state.chain}`)
-            state.chain = 0
-            state.capped = false
+            diag(`人工发言, 重置恢复链 session=${session.id}`)
+            this.resetChain(state)
             return
           }
           // 识别自己的续写消息: v4 形态 `kind='plugin:'+PRODUCER_ID`.
@@ -324,29 +331,24 @@ export class AutoContinue {
     if (state.lastTurn === turn) return
     state.lastTurn = turn
     const repeated = this.repetition?.take(String(session.id), turn, reason) === true
-      && config.repeatDetection
     const truncation = kind === 'max-tokens'
-    const transientFailure = kind === 'error' && config.continueOnError
-      && TRANSIENT_CONTINUE_CODES.has(errorCode ?? '')
-    if (!truncation && !transientFailure && !repeated) {
-      state.chain = 0
-      state.capped = false
+    const transientFailure = kind === 'error' && TRANSIENT_CONTINUE_CODES.has(errorCode ?? '')
+    const recovery: RecoveryKind | undefined = repeated ? 'repeat' : truncation ? 'token' : transientFailure ? 'error' : undefined
+    if (recovery === undefined) {
+      // 仅正常完成重置, 手动中止及不可恢复错误不提供新的自动恢复预算.
+      if (kind === 'completed') this.resetChain(state)
       return
     }
-    diag(
-      `turn/end via=${via} session=${session.id} turn=${turn} kind=${kind}`
-      + `${transientFailure ? ` code=${errorCode ?? ''}` : ''} autoContinue=${config.autoContinue}`
-      + ` repeated=${repeated} maxContinuations=${config.maxContinuations} chain=${state.chain}`,
-    )
-    if (!config.autoContinue) return
-    if (state.chain >= config.maxContinuations) {
-      if (!state.capped) {
-        state.capped = true
+    const policy = recoveryPolicy(config, recovery)
+    diag(`turn/end via=${via} session=${session.id} turn=${turn} kind=${kind}`
+      + ` recovery=${recovery} enabled=${policy.enabled} count=${state.counts[recovery]}/${policy.limit}`)
+    if (!policy.enabled) return
+    if (state.counts[recovery] >= policy.limit) {
+      if (!state.capped.has(recovery)) {
+        state.capped.add(recovery)
         this.observer.hitCap(turn)
-        diag(`bail via=${via}: 连续续写触顶（${state.chain}/${config.maxContinuations}）session=${session.id}`)
-        this.ctx.logger.info(
-          `[dsh-llm-retry-settings] 会话 ${String(session.id)} 连续续写已达上限（${config.maxContinuations} 次），停止自动续写`,
-        )
+        diag(`bail via=${via}: 恢复次数触顶 recovery=${recovery} count=${state.counts[recovery]}/${policy.limit} session=${session.id}`)
+        this.ctx.logger.info(`[dsh-llm-retry-settings] ${recovery} 自动恢复已达上限 ${policy.limit}, session=${String(session.id)}`)
       }
       return
     }
@@ -398,8 +400,7 @@ export class AutoContinue {
     // 截断点分型只用于诊断 (text=yes/no), 判定必须发生在投递前, 通过公开的
     // `seq` / `eventAt` 读取当前会话事件.
     const hasVisibleText = visibleTextBeforeTurnEnd(session, turn)
-    state.chain += 1
-    const expectedChain = state.chain
+    const generation = state.generation
     const sessionId = String(session.id)
     const attempt = (round: number): void => {
       void (async () => {
@@ -408,8 +409,8 @@ export class AutoContinue {
           else await new Promise((resolve) => setTimeout(resolve, 0))
           // 等待期间情况可能已经变了: 跑了新回合, 人工重新发言 (chain 被重置), 或会话
           // 已 dispose. 任何一种都放弃, 绝不补一发过期的续写.
-          if (state.lastTurn !== turn || state.chain !== expectedChain || !this.states.has(sessionId)) {
-            diag(`放弃投递 round=${round} via=${via} session=${sessionId} turn=${turn} lastTurn=${state.lastTurn} chain=${state.chain}`)
+          if (state.lastTurn !== turn || state.generation !== generation || !this.states.has(sessionId)) {
+            diag(`放弃过期投递 round=${round} via=${via} session=${sessionId} turn=${turn}`)
             return
           }
           // 等待 whenIdle 期间用户可能已经自己发言/排队: 让位给用户.
@@ -418,21 +419,16 @@ export class AutoContinue {
             diag(`放弃投递 round=${round} via=${via} session=${sessionId}：等待期间 inbox 已有新消息`)
             return
           }
-          const fresh = this.live.current()
-          if (!fresh.autoContinue || expectedChain > fresh.maxContinuations
-            || (repeated && !fresh.repeatDetection)) return
-          const custom = (repeated ? fresh.repeatContinuationPrompt : fresh.continuationPrompt).trim()
-          const prompt = custom === ''
-            ? (repeated ? DEFAULT_REPEAT_CONTINUATION_PROMPT : DEFAULT_CONTINUATION_PROMPT)
-            : custom
-          agent.followup(makeContinuationMessage(prompt))
+          const fresh = recoveryPolicy(this.live.current(), recovery)
+          if (!fresh.enabled || state.counts[recovery] >= fresh.limit) return
+          agent.followup(makeContinuationMessage(fresh.prompt))
+          // 仅成功入队才占预算, 排队让位或投递失败不消耗次数.
+          state.counts[recovery] += 1
           const known = this.models.of(sessionId)
           this.observer.continued({ turn, provider: known?.provider, model: known?.model })
-          diag(
-            `续写已投递 round=${round} via=${via} session=${sessionId} turn=${turn}`
-            + ` prompt=${custom === '' ? 'default' : 'custom'} text=${hasVisibleText ? 'yes' : 'no'}`
-            + ` chain=${state.chain}/${fresh.maxContinuations}`,
-          )
+          diag(`续写已投递 round=${round} via=${via} session=${sessionId} turn=${turn}`
+            + ` recovery=${recovery} prompt=${fresh.custom ? 'custom' : 'default'}`
+            + ` text=${hasVisibleText ? 'yes' : 'no'} count=${state.counts[recovery]}/${fresh.limit}`)
         } catch (error) {
           diag(`续写投递失败 round=${round} via=${via} session=${sessionId} turn=${turn}：${String(error)}`)
           // Inbox.mutate 是先 append 后改本地数组, 重入抛错即未入队, 只有这一种错误可以
